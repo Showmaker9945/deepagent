@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "do-or-not"
+version = "0.1.0"
+description = "A cheeky decision copilot built with FastAPI, LangChain, and Deep Agents middleware."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "beautifulsoup4>=4.12.3",
+  "deepagents>=0.0.16",
+  "fastapi>=0.115.0",
+  "httpx>=0.28.1",
+  "jinja2>=3.1.4",
+  "langchain>=1.0.0",
+  "langchain-openai>=0.3.0",
+  "langgraph>=1.0.0",
+  "langgraph-checkpoint-sqlite>=2.0.0",
+  "pydantic-settings>=2.7.0",
+  "readability-lxml>=0.8.1",
+  "trafilatura>=2.0.0",
+  "uvicorn[standard]>=0.32.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.4",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
