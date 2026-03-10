@@ -98,6 +98,28 @@ async def submit_feedback(run_id: str, payload: FeedbackRequest, request: Reques
     return JSONResponse({"ok": True})
 
 
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: str, request: Request) -> JSONResponse:
+    storage: Storage = request.app.state.storage
+    run = storage.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    if run.status in {"completed", "failed", "cancelled", "timed_out"}:
+        raise HTTPException(status_code=409, detail="Run has already finished.")
+    if run.status == "needs_clarification":
+        storage.update_status(
+            run_id,
+            "cancelled",
+            cancel_requested=False,
+            error_message="用户在补充信息前停止了本轮分析。",
+        )
+        storage.append_event(run_id, "cancel_requested", {"message": "已收到停止分析请求。"})
+        storage.append_event(run_id, "cancelled", {"message": "这轮分析先停在这里。"})
+    elif storage.request_cancel(run_id):
+        storage.append_event(run_id, "cancel_requested", {"message": "已收到停止分析请求。"})
+    return JSONResponse({"ok": True})
+
+
 @app.get("/api/runs/{run_id}/stream")
 async def stream_run(run_id: str, request: Request) -> StreamingResponse:
     storage: Storage = request.app.state.storage
@@ -106,7 +128,7 @@ async def stream_run(run_id: str, request: Request) -> StreamingResponse:
 
     async def event_generator():
         last_event_id = int(request.headers.get("last-event-id", "0") or 0)
-        terminal = {"completed", "failed"}
+        terminal = {"needs_clarification", "completed", "failed", "cancelled", "timed_out"}
         while True:
             if await request.is_disconnected():
                 break
@@ -122,7 +144,7 @@ async def stream_run(run_id: str, request: Request) -> StreamingResponse:
             if run and run.status in terminal and not events:
                 break
 
-            await asyncio.sleep(0.7)
+            await asyncio.sleep(0.35)
 
     return StreamingResponse(
         event_generator(),

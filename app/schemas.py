@@ -9,15 +9,30 @@ from app.text_utils import extract_urls
 
 
 Category = Literal["spending", "travel", "work_learning", "social", "unsupported"]
-RunStatus = Literal["queued", "running", "needs_clarification", "completed", "failed"]
+RunStatus = Literal[
+    "queued",
+    "running",
+    "needs_clarification",
+    "completed",
+    "failed",
+    "cancelled",
+    "timed_out",
+]
 EventType = Literal[
     "classified",
     "clarification_needed",
-    "research_started",
-    "skeptic_started",
+    "agent_started",
+    "agent_token",
+    "tool_started",
+    "tool_finished",
+    "source_captured",
     "verdict_ready",
+    "cancel_requested",
+    "cancelled",
+    "timeout",
     "error",
 ]
+RunSourceType = Literal["search_result", "webpage", "location", "weather", "tool_note"]
 
 
 class RunCreateRequest(BaseModel):
@@ -104,6 +119,17 @@ class RunEvent(BaseModel):
     created_at: datetime
 
 
+class RunSource(BaseModel):
+    id: int
+    run_id: str
+    source_type: RunSourceType
+    title: str | None = None
+    url: str | None = None
+    snippet: str | None = None
+    source_meta: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
 class RunRecord(BaseModel):
     id: str
     user_id: str
@@ -113,6 +139,7 @@ class RunRecord(BaseModel):
     category: Category | None = None
     clarification_count: int = 0
     clarification_question: str | None = None
+    cancel_requested: bool = False
     classification: ClassificationResult | None = None
     research_summary: ResearchSummary | None = None
     skeptic_summary: SkepticSummary | None = None
@@ -125,6 +152,7 @@ class RunRecord(BaseModel):
 class RunEnvelope(BaseModel):
     run: RunRecord
     events: list[RunEvent] = Field(default_factory=list)
+    sources: list[RunSource] = Field(default_factory=list)
 
 
 class PreferenceSnapshot(BaseModel):

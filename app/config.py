@@ -19,6 +19,8 @@ class Settings(BaseSettings):
         alias="DASHSCOPE_BASE_URL",
     )
     model_name: str = Field(default="qwen3-max", alias="MODEL_NAME")
+    model_timeout_seconds: int = Field(default=18, alias="MODEL_TIMEOUT_SECONDS")
+    run_timeout_seconds: int = Field(default=45, alias="RUN_TIMEOUT_SECONDS")
     tavily_api_key: str | None = Field(default=None, alias="TAVILY_API_KEY")
 
     sqlite_db_path: Path = Field(default=Path("./data/do_or_not.db"), alias="SQLITE_DB_PATH")

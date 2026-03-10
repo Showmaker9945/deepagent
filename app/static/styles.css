@@ -1,12 +1,12 @@
 :root {
-  --bg: #f5efe5;
-  --ink: #12212f;
+  --bg: #f4eee4;
+  --ink: #142230;
   --muted: #5c6875;
-  --panel: rgba(255, 250, 244, 0.86);
-  --line: rgba(18, 33, 47, 0.1);
+  --panel: rgba(255, 250, 244, 0.88);
+  --line: rgba(20, 34, 48, 0.1);
   --accent: #d85d3a;
   --accent-2: #2e8b7f;
-  --shadow: 0 24px 70px rgba(18, 33, 47, 0.12);
+  --shadow: 0 24px 70px rgba(20, 34, 48, 0.12);
   --radius: 24px;
   font-family: "IBM Plex Sans", "Segoe UI Variable", "PingFang SC", sans-serif;
 }
@@ -25,7 +25,7 @@ body {
 }
 
 .shell {
-  max-width: 1180px;
+  max-width: 1240px;
   margin: 0 auto;
   padding: 48px 20px 64px;
 }
@@ -50,16 +50,18 @@ body {
 }
 
 .lede {
-  max-width: 620px;
+  max-width: 720px;
   margin-top: 14px;
-  font-size: 1.1rem;
+  font-size: 1.08rem;
   color: var(--muted);
+  line-height: 1.6;
 }
 
 .workspace {
   display: grid;
   grid-template-columns: minmax(300px, 420px) minmax(0, 1fr);
   gap: 20px;
+  align-items: start;
 }
 
 .panel {
@@ -73,6 +75,10 @@ body {
 .form-panel,
 .result-panel {
   padding: 22px;
+}
+
+.result-panel {
+  min-height: 760px;
 }
 
 label,
@@ -103,7 +109,7 @@ label span {
 textarea,
 input {
   width: 100%;
-  border: 1px solid rgba(18, 33, 47, 0.14);
+  border: 1px solid rgba(20, 34, 48, 0.14);
   border-radius: 16px;
   padding: 14px 16px;
   background: rgba(255, 255, 255, 0.82);
@@ -126,7 +132,7 @@ button {
   border: none;
   border-radius: 999px;
   padding: 12px 18px;
-  transition: transform 140ms ease;
+  transition: transform 140ms ease, opacity 140ms ease;
 }
 
 button:hover {
@@ -143,12 +149,24 @@ button.secondary {
   color: white;
 }
 
+.ghost-button {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid rgba(20, 34, 48, 0.18);
+}
+
 .status-strip {
   display: flex;
   align-items: center;
-  gap: 12px;
   justify-content: space-between;
+  gap: 12px;
   margin-bottom: 18px;
+}
+
+.status-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .tag {
@@ -163,14 +181,50 @@ button.secondary {
 }
 
 .tag.ghost {
-  background: rgba(18, 33, 47, 0.07);
+  background: rgba(20, 34, 48, 0.07);
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.section-head h2 {
+  margin: 0;
+}
+
+.stream-box,
+.timeline-box,
+.clarification,
+.sources,
+.verdict,
+.feedback {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(20, 34, 48, 0.08);
+}
+
+.agent-draft {
+  margin: 0;
+  min-height: 150px;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  border: 1px dashed rgba(20, 34, 48, 0.16);
+  border-radius: 18px;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.44);
+  line-height: 1.6;
 }
 
 .timeline {
   min-height: 160px;
-  max-height: 420px;
+  max-height: 280px;
   overflow: auto;
-  border: 1px dashed rgba(18, 33, 47, 0.16);
+  border: 1px dashed rgba(20, 34, 48, 0.16);
   border-radius: 18px;
   padding: 16px;
   background: rgba(255, 255, 255, 0.42);
@@ -178,7 +232,7 @@ button.secondary {
 
 .timeline-item {
   padding: 10px 0;
-  border-bottom: 1px solid rgba(18, 33, 47, 0.08);
+  border-bottom: 1px solid rgba(20, 34, 48, 0.08);
 }
 
 .timeline-item:last-child {
@@ -190,17 +244,31 @@ button.secondary {
   margin-bottom: 4px;
 }
 
-.hidden {
-  display: none;
+.sources-list {
+  display: grid;
+  gap: 12px;
 }
 
-.clarification,
-.verdict,
-.evidence,
-.feedback {
-  margin-top: 18px;
-  padding-top: 18px;
-  border-top: 1px solid rgba(18, 33, 47, 0.08);
+.source-card {
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(20, 34, 48, 0.08);
+}
+
+.source-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.source-head a,
+.source-head strong {
+  color: var(--ink);
+  text-decoration: none;
+  font-weight: 700;
 }
 
 .columns {
@@ -216,7 +284,7 @@ button.secondary {
 }
 
 .punchline {
-  font-size: 1.1rem;
+  font-size: 1.06rem;
   color: var(--accent);
   font-weight: 700;
 }
@@ -229,6 +297,18 @@ button.secondary {
 
 .muted {
   color: var(--muted);
+}
+
+.small {
+  font-size: 0.9rem;
+}
+
+.tiny {
+  font-size: 0.82rem;
+}
+
+.hidden {
+  display: none;
 }
 
 ul {
@@ -245,5 +325,11 @@ ul {
 
   .shell {
     padding-top: 32px;
+  }
+
+  .status-strip,
+  .section-head {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

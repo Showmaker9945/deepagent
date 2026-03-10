@@ -15,6 +15,8 @@ from app.schemas import (
     RunEnvelope,
     RunEvent,
     RunRecord,
+    RunSource,
+    RunSourceType,
     RunStatus,
     RunVerdict,
     SkepticSummary,
@@ -24,6 +26,7 @@ from app.text_utils import extract_urls
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 class Storage:
     def __init__(self, db_path: Path) -> None:
@@ -73,6 +76,18 @@ class Storage:
                     FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS run_sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    title TEXT,
+                    url TEXT,
+                    snippet TEXT,
+                    source_meta_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS feedback (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_id TEXT NOT NULL,
@@ -100,6 +115,13 @@ class Storage:
                 );
                 """
             )
+            self._ensure_column(connection, "runs", "cancel_requested", "INTEGER NOT NULL DEFAULT 0")
+
+    def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+        rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+        columns = {row["name"] for row in rows}
+        if column not in columns:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     def create_run(self, payload: RunCreateRequest, user_id: str) -> str:
         run_id = str(uuid.uuid4())
@@ -108,8 +130,8 @@ class Storage:
             connection.execute(
                 """
                 INSERT INTO runs (
-                    id, user_id, status, question, input_payload, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    id, user_id, status, question, input_payload, cancel_requested, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -117,6 +139,7 @@ class Storage:
                     "queued",
                     payload.question,
                     payload.model_dump_json(),
+                    0,
                     now,
                     now,
                 ),
@@ -140,11 +163,23 @@ class Storage:
             ).fetchall()
         return [self._row_to_event(row) for row in rows]
 
+    def list_sources(self, run_id: str) -> list[RunSource]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM run_sources
+                WHERE run_id = ?
+                ORDER BY id ASC
+                """,
+                (run_id,),
+            ).fetchall()
+        return [self._row_to_source(row) for row in rows]
+
     def get_run_envelope(self, run_id: str) -> RunEnvelope | None:
         run = self.get_run(run_id)
         if not run:
             return None
-        return RunEnvelope(run=run, events=self.list_events(run_id))
+        return RunEnvelope(run=run, events=self.list_events(run_id), sources=self.list_sources(run_id))
 
     def append_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
         with self.connect() as connection:
@@ -156,6 +191,82 @@ class Storage:
                 (run_id, event_type, json.dumps(payload, ensure_ascii=False), utcnow()),
             )
 
+    def add_source(
+        self,
+        run_id: str,
+        source_type: RunSourceType,
+        *,
+        title: str | None = None,
+        url: str | None = None,
+        snippet: str | None = None,
+        source_meta: dict[str, Any] | None = None,
+    ) -> int:
+        safe_meta = source_meta or {}
+        with self.connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT id FROM run_sources
+                WHERE run_id = ?
+                  AND source_type = ?
+                  AND COALESCE(title, '') = ?
+                  AND COALESCE(url, '') = ?
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (run_id, source_type, title or "", url or ""),
+            ).fetchone()
+            if existing:
+                if snippet or safe_meta:
+                    connection.execute(
+                        """
+                        UPDATE run_sources
+                        SET snippet = COALESCE(?, snippet),
+                            source_meta_json = ?,
+                            created_at = created_at
+                        WHERE id = ?
+                        """,
+                        (snippet, json.dumps(safe_meta, ensure_ascii=False), existing["id"]),
+                    )
+                return int(existing["id"])
+
+            cursor = connection.execute(
+                """
+                INSERT INTO run_sources (run_id, source_type, title, url, snippet, source_meta_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    source_type,
+                    title,
+                    url,
+                    snippet,
+                    json.dumps(safe_meta, ensure_ascii=False),
+                    utcnow(),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def request_cancel(self, run_id: str) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE runs
+                SET cancel_requested = 1, updated_at = ?
+                WHERE id = ?
+                  AND status IN ('queued', 'running', 'needs_clarification')
+                """,
+                (utcnow(), run_id),
+            )
+            return cursor.rowcount > 0
+
+    def is_cancel_requested(self, run_id: str) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT cancel_requested FROM runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        return bool(row["cancel_requested"]) if row else False
+
     def update_status(
         self,
         run_id: str,
@@ -164,6 +275,7 @@ class Storage:
         category: str | None = None,
         clarification_question: str | None = None,
         clarification_count: int | None = None,
+        cancel_requested: bool | None = None,
         error_message: str | None = None,
         classification: ClassificationResult | None = None,
         research_summary: ResearchSummary | None = None,
@@ -171,7 +283,7 @@ class Storage:
         verdict: RunVerdict | None = None,
         input_payload: RunCreateRequest | None = None,
     ) -> None:
-        updates = {
+        updates: dict[str, Any] = {
             "status": status,
             "updated_at": utcnow(),
         }
@@ -181,6 +293,8 @@ class Storage:
             updates["clarification_question"] = clarification_question
         if clarification_count is not None:
             updates["clarification_count"] = clarification_count
+        if cancel_requested is not None:
+            updates["cancel_requested"] = 1 if cancel_requested else 0
         if error_message is not None:
             updates["error_message"] = error_message
         if classification is not None:
@@ -215,7 +329,8 @@ class Storage:
             "queued",
             clarification_count=run.clarification_count + 1,
             clarification_question="",
-            error_message=None,
+            cancel_requested=False,
+            error_message="",
             input_payload=payload,
         )
         return self.get_run(run_id)
@@ -310,7 +425,23 @@ class Storage:
             created_at=datetime.fromisoformat(row["created_at"]),
         )
 
+    def _row_to_source(self, row: sqlite3.Row) -> RunSource:
+        return RunSource(
+            id=row["id"],
+            run_id=row["run_id"],
+            source_type=row["source_type"],
+            title=row["title"],
+            url=row["url"],
+            snippet=row["snippet"],
+            source_meta=json.loads(row["source_meta_json"]) if row["source_meta_json"] else {},
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
     def _row_to_run(self, row: sqlite3.Row) -> RunRecord:
+        classification_json = row["classification_json"]
+        research_json = row["research_json"]
+        skeptic_json = row["skeptic_json"]
+        verdict_json = row["verdict_json"]
         return RunRecord(
             id=row["id"],
             user_id=row["user_id"],
@@ -320,12 +451,11 @@ class Storage:
             category=row["category"],
             clarification_count=row["clarification_count"],
             clarification_question=row["clarification_question"] or None,
-            classification=ClassificationResult.model_validate_json(row["classification_json"])
-            if row["classification_json"]
-            else None,
-            research_summary=ResearchSummary.model_validate_json(row["research_json"]) if row["research_json"] else None,
-            skeptic_summary=SkepticSummary.model_validate_json(row["skeptic_json"]) if row["skeptic_json"] else None,
-            verdict=RunVerdict.model_validate_json(row["verdict_json"]) if row["verdict_json"] else None,
+            cancel_requested=bool(row["cancel_requested"]) if "cancel_requested" in row.keys() else False,
+            classification=ClassificationResult.model_validate_json(classification_json) if classification_json else None,
+            research_summary=ResearchSummary.model_validate_json(research_json) if research_json else None,
+            skeptic_summary=SkepticSummary.model_validate_json(skeptic_json) if skeptic_json else None,
+            verdict=RunVerdict.model_validate_json(verdict_json) if verdict_json else None,
             error_message=row["error_message"],
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),

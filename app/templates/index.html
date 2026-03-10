@@ -4,7 +4,6 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{{ app_name }}</title>
-    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
     <link rel="stylesheet" href="{{ url_for('static', path='styles.css') }}" />
   </head>
   <body>
@@ -13,7 +12,8 @@
         <p class="eyebrow">Decision Copilot</p>
         <h1>{{ app_name }}</h1>
         <p class="lede">
-          把问题、背景、预算、地点、时间、链接一股脑写进来，我负责拆、查、劝、下判断。
+          把问题一股脑写进来就行。预算、地点、时间、链接、纠结点，能写多自然就写多自然。
+          这次由主 Deep Agent 直接接管，不再演三个人轮流抢麦。
         </p>
       </section>
 
@@ -22,12 +22,13 @@
           <label>
             <span>把情况直接说完整</span>
             <p class="form-hint">
-              不用分栏填表。预算、地点、时间、链接、你纠结的点，都可以直接写在这一段里。
+              例子：这周六我想去杭州看展，来回预算 400 左右，活动页
+              https://example.com/event，但我最近有点累，周一还得上班，这趟到底值不值？
             </p>
             <textarea
               name="question"
-              rows="10"
-              placeholder="比如：这周六我想去杭州看展，来回预算 400 左右，活动页 https://example.com/event ，但我最近有点累，还得周一上班，这趟到底值不值？"
+              rows="11"
+              placeholder="这事我要不要做？把你知道的背景都扔进来。"
             ></textarea>
           </label>
 
@@ -36,21 +37,46 @@
 
         <section class="panel result-panel">
           <div class="status-strip">
-            <span id="run-status">待命中</span>
-            <span id="run-category" class="tag ghost">未分类</span>
+            <div class="status-group">
+              <span id="run-status">待命中</span>
+              <span id="run-category" class="tag ghost">未分类</span>
+            </div>
+            <button id="cancel-button" class="ghost-button hidden" type="button">停止分析</button>
           </div>
 
-          <div id="timeline" class="timeline">
-            <p class="muted">时间线会在这里冒出来。</p>
-          </div>
+          <section class="stream-box">
+            <div class="section-head">
+              <h2>实时输出</h2>
+              <span class="muted small">边跑边看，不用盯着空气发呆</span>
+            </div>
+            <pre id="agent-draft" class="agent-draft muted">Deep Agent 一开口，这里就会开始冒字。</pre>
+          </section>
+
+          <section class="timeline-box">
+            <div class="section-head">
+              <h2>运行时间线</h2>
+              <span class="muted small">只记关键动作，不刷屏</span>
+            </div>
+            <div id="timeline" class="timeline">
+              <p class="muted">时间线会在这里出现。</p>
+            </div>
+          </section>
 
           <section id="clarification-box" class="clarification hidden">
-            <h2>补一句就好</h2>
+            <h2>补一句就行</h2>
             <p id="clarification-question"></p>
             <form id="clarification-form">
-              <textarea name="answer" rows="3" placeholder="直接补一句背景，或者贴一个链接也行。"></textarea>
+              <textarea name="answer" rows="3" placeholder="补一句背景，或者直接贴链接也行。"></textarea>
               <button class="secondary" type="submit">继续分析</button>
             </form>
+          </section>
+
+          <section id="sources-box" class="sources hidden">
+            <div class="section-head">
+              <h2>依据出处</h2>
+              <span class="muted small">知道它凭什么说，不靠玄学</span>
+            </div>
+            <div id="sources-list" class="sources-list"></div>
           </section>
 
           <section id="verdict-box" class="verdict hidden">
@@ -63,11 +89,11 @@
 
             <div class="columns">
               <div>
-                <h3>能做的理由</h3>
+                <h3>支持去做的点</h3>
                 <ul id="why-yes"></ul>
               </div>
               <div>
-                <h3>劝你别冲的理由</h3>
+                <h3>劝你冷静的点</h3>
                 <ul id="why-no"></ul>
               </div>
             </div>
@@ -87,21 +113,6 @@
               <h3>下一步</h3>
               <p id="next-step"></p>
               <p id="follow-up" class="muted"></p>
-            </div>
-          </section>
-
-          <section id="evidence-box" class="evidence hidden">
-            <div class="columns">
-              <div>
-                <h3>查到的依据</h3>
-                <p id="research-summary"></p>
-                <ul id="research-points"></ul>
-              </div>
-              <div>
-                <h3>反面意见</h3>
-                <p id="skeptic-summary"></p>
-                <ul id="skeptic-points"></ul>
-              </div>
             </div>
           </section>
 
@@ -128,7 +139,7 @@
                   <input type="text" name="note" placeholder="比如：贵倒是不贵，就是买了也没怎么用。" />
                 </label>
               </div>
-              <button class="secondary" type="submit">写进长期记忆</button>
+              <button class="secondary" type="submit">写进复盘</button>
             </form>
             <p id="feedback-state" class="muted"></p>
           </section>

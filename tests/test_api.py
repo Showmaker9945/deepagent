@@ -1,50 +1,62 @@
 from fastapi.testclient import TestClient
 
+from app.agents import RuntimeStreamEvent
 from app.main import app
-from app.schemas import ResearchSummary, RunVerdict, SkepticSummary
+from app.schemas import RunVerdict
 
 
 class FakeRuntime:
-    def run_researcher(self, payload, classification, snapshot):
-        return ResearchSummary(
-            summary="Research says the idea is plausible.",
-            supporting_evidence=["There is a clear upside."],
-            factual_observations=["Nothing exploded yet."],
-            relevant_links=payload.links,
-            tool_notes=["Stubbed in tests."],
+    def run_streaming(self, run_id, payload, classification, *, timeout_seconds, should_cancel):
+        yield RuntimeStreamEvent(
+            "agent_started",
+            {"category": classification.category, "message": "主 Deep Agent 已接管。"},
+        )
+        yield RuntimeStreamEvent("agent_token", {"text": "我先看一下你给的信息。"})
+        yield RuntimeStreamEvent(
+            "tool_started",
+            {"tool_name": "fetch_url_content", "summary": "开始抓取你给的链接。"},
+        )
+        if payload.links:
+            yield RuntimeStreamEvent(
+                "source_captured",
+                {
+                    "source_type": "webpage",
+                    "title": "示例商品页",
+                    "url": payload.links[0],
+                    "snippet": "这是一个来自测试桩的网页摘要。",
+                    "source_meta": {"query": "stub"},
+                },
+            )
+        yield RuntimeStreamEvent(
+            "tool_finished",
+            {"tool_name": "fetch_url_content", "status": "ok", "summary": "链接抓取完成。"},
+        )
+        yield RuntimeStreamEvent(
+            "verdict_ready",
+            RunVerdict(
+                category=classification.category,
+                verdict="可以做，但别上头",
+                confidence=0.74,
+                why_yes=["收益是真的有。"],
+                why_no=["时间成本比你想象中高。"],
+                top_risks=["范围一不留神就膨胀。"],
+                best_alternative="先做一个更小的试跑版。",
+                recommended_next_step="先拿 30 分钟做最小验证，不要一上来就铺大摊子。",
+                follow_up_question="什么结果会让你觉得这事明显值了？",
+                punchline="能冲，但先别把自己冲成工位摆件。",
+            ).model_dump(mode="json"),
         )
 
-    def run_skeptic(self, payload, classification, snapshot, research):
-        return SkepticSummary(
-            summary="Skeptic says the hidden cost is time.",
-            risks=["You may underestimate the time sink."],
-            reasons_not_to_do=["Your calendar is already crunchy."],
-            cheaper_or_lower_risk_options=["Try a 30-minute version first."],
-            boundary_flags=[],
-        )
 
-    def run_decider(self, run_id, payload, classification, snapshot, research, skeptic):
-        return RunVerdict(
-            category=classification.category,
-            verdict="do it carefully",
-            confidence=0.74,
-            why_yes=["The upside is real."],
-            why_no=["Time cost is the main trap."],
-            top_risks=["Scope creep."],
-            best_alternative="Run a smaller pilot first.",
-            recommended_next_step="Block 30 minutes and test it on a tiny version.",
-            follow_up_question="What would make this obviously worth it?",
-            punchline="能冲，但先别把自己冲成燃尽套餐。",
-        )
-
-
-def test_run_flow_and_feedback():
+def test_run_flow_feedback_and_sources():
     with TestClient(app) as client:
         app.state.manager.runtime = FakeRuntime()
 
         create_response = client.post(
             "/api/runs",
-            json={"question": "这个周末我要不要开始做一个小项目？我想做点能放作品集的东西。"},
+            json={
+                "question": "这个周末我要不要开始做一个小项目？我想做点能放作品集的东西，参考链接 https://example.com/item",
+            },
         )
         assert create_response.status_code == 200
 
@@ -53,7 +65,8 @@ def test_run_flow_and_feedback():
         assert run_response.status_code == 200
         body = run_response.json()
         assert body["run"]["status"] == "completed"
-        assert body["run"]["verdict"]["verdict"] == "do it carefully"
+        assert body["run"]["verdict"]["verdict"] == "可以做，但别上头"
+        assert body["sources"][0]["url"] == "https://example.com/item"
 
         feedback_response = client.post(
             f"/api/runs/{run_id}/feedback",
@@ -61,7 +74,7 @@ def test_run_flow_and_feedback():
                 "actual_action": "做了一个更小的版本",
                 "satisfaction_score": 4,
                 "regret_score": 1,
-                "note": "缩小范围后明显顺畅多了",
+                "note": "缩小范围后顺畅多了。",
             },
         )
         assert feedback_response.status_code == 200
@@ -79,7 +92,7 @@ def test_clarification_flow():
 
         run_response = client.get(f"/api/runs/{run_id}")
         assert run_response.status_code == 200
-        assert run_response.json()["run"]["status"] in {"needs_clarification", "completed"}
+        assert run_response.json()["run"]["status"] == "needs_clarification"
 
 
 def test_clarification_link_is_persisted_and_resumes_run():
@@ -117,7 +130,7 @@ def test_stream_respects_last_event_id_after_completion():
 
         create_response = client.post(
             "/api/runs",
-            json={"question": "这个周末我要不要开始做一个小项目？我想做点能放作品集的东西。"},
+            json={"question": "这个周末要不要做一个新项目？"},
         )
         assert create_response.status_code == 200
 
@@ -150,3 +163,22 @@ def test_freeform_question_can_finish_without_extra_form_fields():
         run_response = client.get(f"/api/runs/{run_id}")
         assert run_response.status_code == 200
         assert run_response.json()["run"]["status"] == "completed"
+
+
+def test_cancel_endpoint_marks_waiting_run_cancelled():
+    with TestClient(app) as client:
+        app.state.manager.runtime = FakeRuntime()
+
+        create_response = client.post(
+            "/api/runs",
+            json={"question": "要不要去", "notes": "", "links": []},
+        )
+        assert create_response.status_code == 200
+        run_id = create_response.json()["run_id"]
+
+        cancel_response = client.post(f"/api/runs/{run_id}/cancel")
+        assert cancel_response.status_code == 200
+
+        run_response = client.get(f"/api/runs/{run_id}")
+        assert run_response.status_code == 200
+        assert run_response.json()["run"]["status"] == "cancelled"
