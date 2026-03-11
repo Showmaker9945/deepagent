@@ -3,7 +3,9 @@ from __future__ import annotations
 from app.agents import AgentConfigurationError, DecisionAgentRuntime, RuntimeStreamEvent
 from app.classifier import classify_request
 from app.config import Settings
-from app.schemas import FeedbackRequest, RunCreateRequest, RunVerdict
+from app.fallbacks import build_fallback_verdict
+from app.scoring import score_tradeoff
+from app.schemas import ClassificationResult, FeedbackRequest, RunCreateRequest, RunVerdict
 from app.storage import Storage
 
 
@@ -105,23 +107,23 @@ class RunManager:
                 if self.storage.is_cancel_requested(run_id):
                     self._mark_cancelled(run_id, "分析被你手动停下来了。")
                 else:
-                    self.storage.update_status(
+                    self._complete_with_fallback(
                         run_id,
-                        "failed",
-                        cancel_requested=False,
-                        error_message="Deep Agent 没有返回最终结论。",
-                    )
-                    self.storage.append_event(
-                        run_id,
-                        "error",
-                        {"message": "Deep Agent 没有返回最终结论。"},
+                        payload,
+                        classification,
+                        reason="主 Deep Agent 没有稳定产出结构化结论，已切到本地保守兜底。",
                     )
         except AgentConfigurationError as exc:
             self.storage.update_status(run_id, "failed", cancel_requested=False, error_message=str(exc))
             self.storage.append_event(run_id, "error", {"message": str(exc)})
         except Exception as exc:  # pragma: no cover
-            self.storage.update_status(run_id, "failed", cancel_requested=False, error_message=str(exc))
-            self.storage.append_event(run_id, "error", {"message": str(exc)})
+            self._complete_with_fallback(
+                run_id,
+                payload,
+                classification,
+                reason=f"主 Deep Agent 运行时翻车了，已切到本地保守兜底：{exc}",
+                emit_error_event=True,
+            )
 
     def _handle_runtime_event(self, run_id: str, event: RuntimeStreamEvent) -> bool:
         if event.event_type == "source_captured":
@@ -154,12 +156,17 @@ class RunManager:
 
         if event.event_type == "timeout":
             message = event.payload.get("message") or "分析超时。"
-            self.storage.update_status(
-                run_id,
-                "timed_out",
-                cancel_requested=False,
-                error_message=message,
-            )
+            run = self.storage.get_run(run_id)
+            if run:
+                payload = RunCreateRequest.model_validate(run.input_payload)
+                classification = run.classification or classify_request(payload)
+                self._complete_with_fallback(
+                    run_id,
+                    payload,
+                    classification,
+                    reason=f"{message} 已切到本地保守兜底。",
+                    append_verdict_event=False,
+                )
             self.storage.append_event(run_id, "timeout", {"message": message})
             return True
 
@@ -176,6 +183,37 @@ class RunManager:
 
         self.storage.append_event(run_id, event.event_type, event.payload)
         return False
+
+    def _complete_with_fallback(
+        self,
+        run_id: str,
+        payload: RunCreateRequest,
+        classification: ClassificationResult,
+        *,
+        reason: str,
+        emit_error_event: bool = False,
+        append_verdict_event: bool = True,
+    ) -> None:
+        score_result = score_tradeoff(classification.category, payload)
+        verdict = build_fallback_verdict(classification.category, payload, classification, score_result)
+        self.storage.add_source(
+            run_id,
+            "tool_note",
+            title="本地保守兜底",
+            snippet=reason,
+            source_meta=score_result,
+        )
+        self.storage.update_status(
+            run_id,
+            "completed",
+            verdict=verdict,
+            cancel_requested=False,
+            error_message=reason if emit_error_event else "",
+        )
+        if emit_error_event:
+            self.storage.append_event(run_id, "error", {"message": reason})
+        elif append_verdict_event:
+            self.storage.append_event(run_id, "verdict_ready", verdict.model_dump(mode="json"))
 
     def _mark_cancelled(self, run_id: str, message: str) -> None:
         self.storage.update_status(

@@ -53,7 +53,7 @@ uv run pytest -q
 当前预期：
 
 - 全部通过
-- 基线结果为 `9 passed`
+- 基线结果为 `11 passed`
 
 ### 2.2 FastAPI 导入测试
 
@@ -67,10 +67,24 @@ uv run python -c "from app.main import app; print(app.title)"
 do or not
 ```
 
-## 3. 启动服务
+### 2.3 健康检查
+
+先启动服务：
 
 ```bash
 uv run uvicorn app.main:app --reload
+```
+
+然后另开一个终端执行：
+
+```bash
+uv run python -c "import httpx; print(httpx.get('http://127.0.0.1:8000/healthz').json())"
+```
+
+预期输出：
+
+```text
+{'ok': True}
 ```
 
 浏览器打开：
@@ -169,6 +183,20 @@ uv run uvicorn app.main:app --reload
 - 每条来源至少能看到类型、标题/链接、摘要
 - 如果是搜索结果，能看到查询痕迹或摘要
 
+### 5.3 本地预分析可见
+
+输入任意正常问题，例如：
+
+```text
+我已经有两把键盘了，但又看上一把新的机械键盘，这笔钱花得值不值？
+```
+
+确认点：
+
+- “依据出处”里会先出现一条 `本地预分析`
+- 这条来源会带本地权衡分，不需要先联网就能开工
+- 主 Agent 后续是否联网，取决于信息是否真的不足
+
 ## 6. 停止与超时测试
 
 ### 6.1 用户主动停止
@@ -208,8 +236,25 @@ RUN_TIMEOUT_SECONDS=1
 
 确认点：
 
-- 最终状态变成 `超时收手`
-- 页面能看到超时事件，而不是一直转圈
+- 时间线里能看到超时事件
+- 结果页依然能拿到一个保守 verdict
+- 页面不会一直转圈
+
+### 6.4 兜底 verdict
+
+这条主要验证“主 Agent 没稳住时，系统是否还能给出保守结论”。
+
+最简单的做法有两种：
+
+1. 临时把 `RUN_TIMEOUT_SECONDS` 设成很小，例如 `1`
+2. 或者故意给一个更复杂、联网概率更高的问题
+
+确认点：
+
+- 时间线里会出现 `timeout` 或错误提示
+- 最终结果页依然能看到 verdict
+- “依据出处”里会出现 `本地保守兜底`
+- 这说明系统已经从主 Agent 切到了本地 fallback，而不是直接躺平
 
 ## 7. 分类与边界测试
 
@@ -276,8 +321,8 @@ RUN_TIMEOUT_SECONDS=1
 ### 8.1 创建 run
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/runs ^
-  -H "Content-Type: application/json" ^
+curl -X POST http://127.0.0.1:8000/api/runs \
+  -H "Content-Type: application/json" \
   -d "{\"question\":\"这周末要不要开始做一个小项目？\"}"
 ```
 
@@ -327,6 +372,38 @@ curl -X POST http://127.0.0.1:8000/api/runs/<RUN_ID>/cancel
 - 运行中时可以停止
 - 已完成后再次停止会返回 `409`
 
+### 8.5 PowerShell 版接口测试
+
+如果你在 Windows PowerShell 里直接测接口，下面这套更省心：
+
+创建 run：
+
+```powershell
+$body = @{
+  question = "这周末要不要开始做一个新项目？"
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8000/api/runs" `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body $body
+```
+
+读取结果：
+
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/runs/<RUN_ID>"
+```
+
+停止运行：
+
+```powershell
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8000/api/runs/<RUN_ID>/cancel" `
+  -Method Post
+```
+
 ## 9. 回归清单
 
 每次你对 agent 结构、前端事件流、工具层做较大改动后，至少跑这几项：
@@ -344,8 +421,72 @@ uv run python -c "from app.main import app; print(app.title)"
 4. 一个默认不联网的 `social`
 5. 一个必须克制输出的 `unsupported`
 
+然后再额外补 3 条：
+
+6. 一个会触发补问的问题
+7. 一个会触发超时或 fallback 的问题
+8. 一个手动点击“停止分析”的问题
+
 ## 10. 当前已知非阻塞项
 
 - `requests` 依赖链会给出 `urllib3/chardet/charset_normalizer` 的版本警告
 - 这条警告目前不影响项目运行和测试通过
 - 如果后面要做依赖清理，可以单独升级或重锁 `uv.lock`
+
+## 11. 真模型实跑建议
+
+自动化测试只能保证“线通了”，不能保证“味对了”。真模型实跑时，建议你至少准备这 6 条真实问题：
+
+1. 一个你自己真的纠结过的消费问题
+2. 一个带时间地点的出行问题
+3. 一个容易热血上头的副项目问题
+4. 一个不该联网的社交问题
+5. 一个带链接但网页可能不稳定的问题
+6. 一个高风险 `unsupported` 问题
+
+每条都看这 7 个维度：
+
+1. 分类对不对
+2. 会不会乱联网
+3. 流式输出是不是自然
+4. 来源是不是看得懂
+5. 结论是不是明确但不过度自信
+6. 下一步是不是低摩擦
+7. 语气是不是中文、克制、稍微有点好笑但不油
+
+## 12. 常见故障排查
+
+### 12.1 页面能打开，但一提问就报错
+
+优先检查：
+
+- `.env` 里是否填写了 `DASHSCOPE_API_KEY`
+- `DASHSCOPE_BASE_URL` 是否正确
+- `MODEL_NAME` 是否还是 `qwen3-max`
+
+### 12.2 有流式过程，但拿不到最终结果
+
+先看：
+
+- `/api/runs/<RUN_ID>` 里的 `run.verdict` 是否为空
+- `events` 里最后一个终止事件是 `timeout`、`error` 还是 `verdict_ready`
+- `sources` 里是否出现了 `本地保守兜底`
+
+如果出现 `本地保守兜底`，说明不是彻底没结果，而是已经切 fallback 了。
+
+### 12.3 右侧内容又开始无限变长
+
+优先检查：
+
+- 是否把 token 又塞回了时间线而不是“实时输出”框
+- CSS 里的 `.agent-draft` 和 `.timeline` 是否还保留 `max-height` 与 `overflow: auto`
+
+### 12.4 联网太慢
+
+可以先试：
+
+- 临时不配 `TAVILY_API_KEY`
+- 把问题说得更完整
+- 直接把你要分析的链接贴进去
+
+这样主 Agent 更容易直接基于现有信息和预分析给结论，而不是出去到处乱逛

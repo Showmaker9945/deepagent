@@ -48,6 +48,20 @@ class FakeRuntime:
         )
 
 
+class TimeoutRuntime:
+    def run_streaming(self, run_id, payload, classification, *, timeout_seconds, should_cancel):
+        yield RuntimeStreamEvent(
+            "agent_started",
+            {"category": classification.category, "message": "主 Deep Agent 已接管。"},
+        )
+        yield RuntimeStreamEvent("timeout", {"message": "本轮分析超过 1 秒，已自动收手。"})
+
+
+class ExplodingRuntime:
+    def run_streaming(self, run_id, payload, classification, *, timeout_seconds, should_cancel):
+        raise RuntimeError("stub exploded")
+
+
 def test_run_flow_feedback_and_sources():
     with TestClient(app) as client:
         app.state.manager.runtime = FakeRuntime()
@@ -66,7 +80,7 @@ def test_run_flow_feedback_and_sources():
         body = run_response.json()
         assert body["run"]["status"] == "completed"
         assert body["run"]["verdict"]["verdict"] == "可以做，但别上头"
-        assert body["sources"][0]["url"] == "https://example.com/item"
+        assert any(source["url"] == "https://example.com/item" for source in body["sources"])
 
         feedback_response = client.post(
             f"/api/runs/{run_id}/feedback",
@@ -182,3 +196,42 @@ def test_cancel_endpoint_marks_waiting_run_cancelled():
         run_response = client.get(f"/api/runs/{run_id}")
         assert run_response.status_code == 200
         assert run_response.json()["run"]["status"] == "cancelled"
+
+
+def test_timeout_uses_fallback_verdict_and_keeps_timeout_event():
+    with TestClient(app) as client:
+        app.state.manager.runtime = TimeoutRuntime()
+
+        create_response = client.post(
+            "/api/runs",
+            json={"question": "这个周末要不要开始做一个新项目？"},
+        )
+        assert create_response.status_code == 200
+        run_id = create_response.json()["run_id"]
+
+        run_response = client.get(f"/api/runs/{run_id}")
+        assert run_response.status_code == 200
+        body = run_response.json()
+        assert body["run"]["status"] == "completed"
+        assert body["run"]["verdict"] is not None
+        assert any(event["event_type"] == "timeout" for event in body["events"])
+        assert any(source["title"] == "本地保守兜底" for source in body["sources"])
+
+
+def test_runtime_exception_uses_fallback_verdict():
+    with TestClient(app) as client:
+        app.state.manager.runtime = ExplodingRuntime()
+
+        create_response = client.post(
+            "/api/runs",
+            json={"question": "我要不要买这个新键盘？"},
+        )
+        assert create_response.status_code == 200
+        run_id = create_response.json()["run_id"]
+
+        run_response = client.get(f"/api/runs/{run_id}")
+        assert run_response.status_code == 200
+        body = run_response.json()
+        assert body["run"]["status"] == "completed"
+        assert body["run"]["verdict"] is not None
+        assert any(event["event_type"] == "error" for event in body["events"])

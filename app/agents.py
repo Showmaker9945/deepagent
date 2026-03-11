@@ -12,6 +12,7 @@ from langchain_openai import ChatOpenAI
 
 from app.config import Settings
 from app.prompts import build_main_prompt
+from app.scoring import score_tradeoff
 from app.schemas import ClassificationResult, RunCreateRequest, RunVerdict
 from app.tools import ToolFactory, reset_tool_context, set_tool_context
 
@@ -74,7 +75,8 @@ class DecisionAgentRuntime:
         should_cancel: Callable[[], bool],
     ) -> Iterator[RuntimeStreamEvent]:
         agent = self._get_agent(classification)
-        prompt = self._build_context_prompt(payload, classification)
+        preflight_tradeoff = score_tradeoff(classification.category, payload)
+        prompt = self._build_context_prompt(payload, classification, preflight_tradeoff)
         start_time = time.monotonic()
         token_buffer = ""
         context_token = set_tool_context(
@@ -82,16 +84,30 @@ class DecisionAgentRuntime:
                 "run_id": run_id,
                 "category": classification.category,
                 "links": payload.links,
+                "preflight_tradeoff": preflight_tradeoff,
             }
         )
 
         try:
             yield RuntimeStreamEvent(
+                "source_captured",
+                {
+                    "source_type": "tool_note",
+                    "title": "本地预分析",
+                    "url": None,
+                    "snippet": preflight_tradeoff.get("summary"),
+                    "source_meta": {
+                        "average": preflight_tradeoff.get("average"),
+                        "scores": preflight_tradeoff.get("scores", {}),
+                    },
+                },
+            )
+            yield RuntimeStreamEvent(
                 "agent_started",
                 {
                     "category": classification.category,
                     "mode": "deep_agent",
-                    "message": "主 Deep Agent 已接管，本轮会边查边吐进度。",
+                    "message": "主 Deep Agent 已接管，我先用本地预分析打底，再决定是否值得联网。",
                 },
             )
 
@@ -207,7 +223,12 @@ class DecisionAgentRuntime:
             return "".join(parts)
         return ""
 
-    def _build_context_prompt(self, payload: RunCreateRequest, classification: ClassificationResult) -> str:
+    def _build_context_prompt(
+        self,
+        payload: RunCreateRequest,
+        classification: ClassificationResult,
+        preflight_tradeoff: dict[str, Any],
+    ) -> str:
         context = {
             "question": payload.question,
             "budget": payload.budget,
@@ -216,9 +237,32 @@ class DecisionAgentRuntime:
             "links": payload.links,
             "notes": payload.notes,
             "classification": classification.model_dump(mode="json"),
+            "context_hints": self._build_context_hints(payload, classification),
+            "preflight_tradeoff": preflight_tradeoff,
         }
         return (
             "请帮我判断这件事到底做还是不做。必要时使用工具补充事实，但不要过度开工。"
+            "你已经拿到一份本地预分析分数，请先基于它思考；只有它解决不了的问题，再考虑工具。"
             "如果证据不完整，也要先给出尽力而为的判断。以下是上下文：\n"
             f"{json.dumps(context, ensure_ascii=False, indent=2)}"
         )
+
+    def _build_context_hints(self, payload: RunCreateRequest, classification: ClassificationResult) -> dict[str, Any]:
+        hints = {
+            "question_length": len(payload.question.strip()),
+            "has_links": bool(payload.links),
+            "has_budget": bool(payload.budget),
+            "has_deadline": bool(payload.deadline),
+            "has_location": bool(payload.location),
+            "missing_fields": classification.missing_fields,
+            "suggested_tool_policy": [],
+        }
+        if payload.links:
+            hints["suggested_tool_policy"].append("优先读取用户给的链接，而不是先做公开网页搜索。")
+        if classification.category == "social":
+            hints["suggested_tool_policy"].append("社交类问题默认不联网，只基于用户提供的背景判断。")
+        if classification.category == "travel" and payload.location:
+            hints["suggested_tool_policy"].append("如果需要补事实，优先地理编码和天气，不要先盲搜。")
+        if not payload.links and classification.category in {"spending", "work_learning"}:
+            hints["suggested_tool_policy"].append("如果现有上下文已经够用，就直接判断，不要为了联网而联网。")
+        return hints

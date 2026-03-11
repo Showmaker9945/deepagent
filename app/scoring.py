@@ -63,5 +63,5 @@ def score_tradeoff(category: Category, request: RunCreateRequest) -> dict[str, A
         scores["budget_ready"] = 8
 
     average = round(sum(scores.values()) / max(len(scores), 1), 1)
-    summary = f"{category.replace('_', ' ')} tradeoff score looks like {average}/10 based on the current facts."
+    summary = f"基于当前信息，这个 {category.replace('_', ' ')} 问题的本地权衡分大约是 {average}/10。"
     return {"category": category, "scores": scores, "average": average, "summary": summary}
