@@ -26,7 +26,7 @@ async def lifespan(app: FastAPI):
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     storage = Storage(settings.sqlite_db_path)
     storage.init_db()
-    manager = RunManager(settings, storage, DecisionAgentRuntime(settings))
+    manager = RunManager(settings, storage, DecisionAgentRuntime(settings, storage))
     app.state.storage = storage
     app.state.manager = manager
     yield

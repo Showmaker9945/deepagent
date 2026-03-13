@@ -9,8 +9,10 @@ from deepagents import create_deep_agent
 from deepagents.backends import StateBackend
 from langchain.agents.structured_output import ToolStrategy
 from langchain_openai import ChatOpenAI
+from pydantic import SecretStr
 
 from app.config import Settings
+from app.storage import Storage
 from app.prompts import build_main_prompt
 from app.scoring import score_tradeoff
 from app.schemas import ClassificationResult, RunCreateRequest, RunVerdict
@@ -28,8 +30,9 @@ class RuntimeStreamEvent:
 
 
 class DecisionAgentRuntime:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, storage: Storage) -> None:
         self.settings = settings
+        self.storage = storage
         self.tools = ToolFactory(settings).build()
         self._model: ChatOpenAI | None = None
         self._agents: dict[tuple[str, bool], Any] = {}
@@ -39,8 +42,9 @@ class DecisionAgentRuntime:
             return self._model
         if not self.settings.dashscope_api_key:
             raise AgentConfigurationError("缺少 `DASHSCOPE_API_KEY`，请先在 `.env` 里填好再运行。")
+        api_key = SecretStr(self.settings.dashscope_api_key)
         self._model = ChatOpenAI(
-            api_key=self.settings.dashscope_api_key,
+            api_key=api_key,
             base_url=self.settings.dashscope_base_url,
             model=self.settings.model_name,
             temperature=0.1,
@@ -76,7 +80,8 @@ class DecisionAgentRuntime:
     ) -> Iterator[RuntimeStreamEvent]:
         agent = self._get_agent(classification)
         preflight_tradeoff = score_tradeoff(classification.category, payload)
-        prompt = self._build_context_prompt(payload, classification, preflight_tradeoff)
+        memory_snapshot = self.storage.get_memory_snapshot().model_dump(mode="json")
+        prompt = self._build_context_prompt(payload, classification, preflight_tradeoff, memory_snapshot)
         start_time = time.monotonic()
         token_buffer = ""
         context_token = set_tool_context(
@@ -228,6 +233,7 @@ class DecisionAgentRuntime:
         payload: RunCreateRequest,
         classification: ClassificationResult,
         preflight_tradeoff: dict[str, Any],
+        memory_snapshot: dict[str, str],
     ) -> str:
         context = {
             "question": payload.question,
@@ -237,6 +243,7 @@ class DecisionAgentRuntime:
             "links": payload.links,
             "notes": payload.notes,
             "classification": classification.model_dump(mode="json"),
+            "memory_snapshot": memory_snapshot,
             "context_hints": self._build_context_hints(payload, classification),
             "preflight_tradeoff": preflight_tradeoff,
         }

@@ -138,6 +138,46 @@ def test_clarification_link_is_persisted_and_resumes_run():
         assert "Clarification: 商品链接在这：https://example.com/item，帮我看看值不值。" in body["run"]["input_payload"]["notes"]
 
 
+def test_clarification_links_are_revalidated_and_capped():
+    with TestClient(app) as client:
+        app.state.manager.runtime = FakeRuntime()
+
+        create_response = client.post(
+            "/api/runs",
+            json={"question": "upgrade?", "notes": "", "links": []},
+        )
+        assert create_response.status_code == 200
+
+        run_id = create_response.json()["run_id"]
+        clarification_response = client.post(
+            f"/api/runs/{run_id}/clarifications",
+            json={
+                "answer": (
+                    "Here are the links "
+                    "https://example.com/1 "
+                    "https://example.com/2 "
+                    "https://example.com/3 "
+                    "https://example.com/4 "
+                    "https://example.com/5 "
+                    "https://example.com/6"
+                )
+            },
+        )
+        assert clarification_response.status_code == 200
+
+        run_response = client.get(f"/api/runs/{run_id}")
+        assert run_response.status_code == 200
+        links = run_response.json()["run"]["input_payload"]["links"]
+        assert len(links) == 5
+        assert links == [
+            "https://example.com/1",
+            "https://example.com/2",
+            "https://example.com/3",
+            "https://example.com/4",
+            "https://example.com/5",
+        ]
+
+
 def test_stream_respects_last_event_id_after_completion():
     with TestClient(app) as client:
         app.state.manager.runtime = FakeRuntime()

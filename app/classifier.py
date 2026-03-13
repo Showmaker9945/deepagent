@@ -89,8 +89,6 @@ def classify_request(payload: RunCreateRequest) -> ClassificationResult:
 
     if payload.location and ("\u53bb" in payload.question or "\u5230" in payload.question):
         scores["travel"] += 2
-    if payload.links:
-        scores["spending"] += 1
     if any(
         term in payload.question
         for term in (

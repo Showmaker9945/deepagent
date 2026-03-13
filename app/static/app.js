@@ -82,6 +82,10 @@ function closeStream() {
   }
 }
 
+function canCancelRun(run) {
+  return ["queued", "running", "needs_clarification"].includes(run.status) && !run.cancel_requested;
+}
+
 function setStatus(status) {
   $("#run-status").textContent = STATUS_LABELS[status] || status || "待命中";
 }
@@ -337,7 +341,7 @@ async function loadRun(runId) {
   const run = data.run;
   setStatus(run.status);
   setCategory(run.category);
-  setCancelVisibility(run.status === "queued" || run.status === "running");
+  setCancelVisibility(canCancelRun(run));
 
   if (run.status === "needs_clarification" && run.clarification_question) {
     $("#clarification-box").classList.remove("hidden");
@@ -433,6 +437,9 @@ $("#feedback-form").addEventListener("submit", async (event) => {
 
 $("#cancel-button").addEventListener("click", async () => {
   if (!state.runId) return;
-  await fetch(`/api/runs/${state.runId}/cancel`, { method: "POST" });
+  const response = await fetch(`/api/runs/${state.runId}/cancel`, { method: "POST" });
   setCancelVisibility(false);
+  if (response.ok) {
+    await loadRun(state.runId);
+  }
 });

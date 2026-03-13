@@ -8,8 +8,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from app.memory import compile_memory_snapshot
 from app.schemas import (
     ClassificationResult,
+    PreferenceSnapshot,
     ResearchSummary,
     RunCreateRequest,
     RunEnvelope,
@@ -320,10 +322,15 @@ class Storage:
             return None
         payload = RunCreateRequest.model_validate(run.input_payload)
         discovered_links = extract_urls(answer)
-        if discovered_links:
-            existing = set(payload.links)
-            payload.links = payload.links + [link for link in discovered_links if link not in existing]
-        payload.notes = "\n".join(part for part in [payload.notes or "", f"Clarification: {answer}"] if part).strip()
+        updated_payload = RunCreateRequest(
+            question=payload.question,
+            budget=payload.budget,
+            deadline=payload.deadline,
+            location=payload.location,
+            links=[*payload.links, *discovered_links],
+            notes="\n".join(part for part in [payload.notes or "", f"Clarification: {answer}"] if part).strip(),
+            user_id=payload.user_id,
+        )
         self.update_status(
             run_id,
             "queued",
@@ -331,7 +338,7 @@ class Storage:
             clarification_question="",
             cancel_requested=False,
             error_message="",
-            input_payload=payload,
+            input_payload=updated_payload,
         )
         return self.get_run(run_id)
 
@@ -415,6 +422,9 @@ class Storage:
                 "SELECT key, summary, count, updated_at FROM regret_patterns ORDER BY count DESC, updated_at DESC LIMIT 10"
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_memory_snapshot(self) -> PreferenceSnapshot:
+        return compile_memory_snapshot(self.get_preferences(), self.get_regret_patterns())
 
     def _row_to_event(self, row: sqlite3.Row) -> RunEvent:
         return RunEvent(
