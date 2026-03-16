@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import logging
+import time
+
 from app.agents import AgentConfigurationError, DecisionAgentRuntime, RuntimeStreamEvent
 from app.classifier import classify_request
 from app.config import Settings
 from app.fallbacks import build_fallback_verdict
-from app.scoring import score_tradeoff
 from app.schemas import ClassificationResult, FeedbackRequest, RunCreateRequest, RunVerdict
+from app.scoring import score_tradeoff
 from app.storage import Storage
 
-
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timed_out"}
+logger = logging.getLogger(__name__)
 
 
 class RunManager:
@@ -20,109 +23,167 @@ class RunManager:
 
     def start_run(self, payload: RunCreateRequest) -> str:
         user_id = payload.user_id or self.settings.default_user_id
-        return self.storage.create_run(payload, user_id)
+        run_id = self.storage.create_run(payload, user_id)
+        logger.info("Queued run", extra={"run_id": run_id, "status": "queued"})
+        return run_id
 
     def process_run(self, run_id: str) -> None:
         run = self.storage.get_run(run_id)
         if not run or run.status in TERMINAL_STATUSES:
             return
-        if run.cancel_requested:
-            self._mark_cancelled(run_id, "分析在开始前就被你叫停了。")
-            return
 
-        payload = RunCreateRequest.model_validate(run.input_payload)
-        classification = classify_request(payload)
-        self.storage.update_status(
-            run_id,
-            "running",
-            category=classification.category,
-            classification=classification,
-            cancel_requested=False,
-            error_message="",
-        )
-        self.storage.append_event(
-            run_id,
-            "classified",
-            {
-                "category": classification.category,
-                "reason": classification.reason,
-            },
-        )
+        started_at = time.monotonic()
+        logger.info("Processing run", extra={"run_id": run_id, "status": run.status})
 
-        if classification.needs_clarification and run.clarification_count < 2:
+        try:
+            if run.cancel_requested:
+                self._mark_cancelled(run_id, "分析在开始前就被你叫停了。")
+                return
+
+            payload = RunCreateRequest.model_validate(run.input_payload)
+            classification = classify_request(payload)
             self.storage.update_status(
                 run_id,
-                "needs_clarification",
-                clarification_question=classification.clarification_question,
+                "running",
+                category=classification.category,
                 classification=classification,
-                cancel_requested=False,
-            )
-            self.storage.append_event(
-                run_id,
-                "clarification_needed",
-                {"question": classification.clarification_question},
-            )
-            return
-
-        if classification.category == "unsupported":
-            verdict = RunVerdict(
-                category="unsupported",
-                verdict="先别让模型替你硬猜",
-                confidence=0.94,
-                why_yes=[],
-                why_no=[
-                    "这属于高风险问题，靠通用模型拍板很容易把谨慎感搞丢。",
-                    "真正重要的细节，还是要让合格专业人士来判断。",
-                ],
-                top_risks=["把不确定的建议误当成专业意见。"],
-                best_alternative="先整理事实、症状、限制条件或证据，再去问对应的专业人士。",
-                recommended_next_step="把你最需要确认的 3 个具体问题写下来，带着去咨询专业人士。",
-                follow_up_question="你真正需要专业人士回答的那一句话，具体是什么？",
-                punchline=None,
-            )
-            self.storage.update_status(
-                run_id,
-                "completed",
-                verdict=verdict,
                 cancel_requested=False,
                 error_message="",
             )
-            self.storage.append_event(run_id, "verdict_ready", verdict.model_dump(mode="json"))
-            return
-
-        try:
-            terminal_reached = False
-            for event in self.runtime.run_streaming(
+            self.storage.append_event(
                 run_id,
-                payload,
-                classification,
-                timeout_seconds=self.settings.run_timeout_seconds,
-                should_cancel=lambda: self.storage.is_cancel_requested(run_id),
-            ):
-                if self._handle_runtime_event(run_id, event):
-                    terminal_reached = True
-                    break
+                "classified",
+                {
+                    "category": classification.category,
+                    "reason": classification.reason,
+                },
+            )
+            logger.info(
+                "Classified run",
+                extra={
+                    "run_id": run_id,
+                    "category": classification.category,
+                    "status": "classified",
+                },
+            )
 
-            if not terminal_reached:
-                if self.storage.is_cancel_requested(run_id):
-                    self._mark_cancelled(run_id, "分析被你手动停下来了。")
-                else:
-                    self._complete_with_fallback(
-                        run_id,
-                        payload,
-                        classification,
-                        reason="主 Deep Agent 没有稳定产出结构化结论，已切到本地保守兜底。",
-                    )
-        except AgentConfigurationError as exc:
-            self.storage.update_status(run_id, "failed", cancel_requested=False, error_message=str(exc))
-            self.storage.append_event(run_id, "error", {"message": str(exc)})
-        except Exception as exc:  # pragma: no cover
-            self._complete_with_fallback(
-                run_id,
-                payload,
-                classification,
-                reason=f"主 Deep Agent 运行时翻车了，已切到本地保守兜底：{exc}",
-                emit_error_event=True,
+            if classification.needs_clarification and run.clarification_count < 2:
+                self.storage.update_status(
+                    run_id,
+                    "needs_clarification",
+                    clarification_question=classification.clarification_question,
+                    classification=classification,
+                    cancel_requested=False,
+                )
+                self.storage.append_event(
+                    run_id,
+                    "clarification_needed",
+                    {"question": classification.clarification_question},
+                )
+                logger.info(
+                    "Run needs clarification",
+                    extra={
+                        "run_id": run_id,
+                        "category": classification.category,
+                        "status": "needs_clarification",
+                    },
+                )
+                return
+
+            if classification.category == "unsupported":
+                verdict = RunVerdict(
+                    category="unsupported",
+                    verdict="先别让模型替你硬猜。",
+                    confidence=0.94,
+                    why_yes=[],
+                    why_no=[
+                        "这属于高风险问题，靠通用模型拍板很容易把谨慎感搞丢。",
+                        "真正重要的细节，还是要让合格专业人士来判断。",
+                    ],
+                    top_risks=["把不确定的建议误当成专业意见。"],
+                    best_alternative="先整理事实、症状、限制条件或证据，再去问对应的专业人士。",
+                    recommended_next_step="把你最需要确认的 3 个具体问题写下来，带着去咨询专业人士。",
+                    follow_up_question="你真正需要专业人士回答的那一句话，具体是什么？",
+                    punchline=None,
+                )
+                self.storage.update_status(
+                    run_id,
+                    "completed",
+                    verdict=verdict,
+                    cancel_requested=False,
+                    error_message="",
+                )
+                self.storage.append_event(run_id, "verdict_ready", verdict.model_dump(mode="json"))
+                logger.info(
+                    "Completed unsupported run without agent",
+                    extra={
+                        "run_id": run_id,
+                        "category": classification.category,
+                        "status": "completed",
+                    },
+                )
+                return
+
+            try:
+                terminal_reached = False
+                for event in self.runtime.run_streaming(
+                    run_id,
+                    payload,
+                    classification,
+                    timeout_seconds=self.settings.run_timeout_seconds,
+                    should_cancel=lambda: self.storage.is_cancel_requested(run_id),
+                ):
+                    if self._handle_runtime_event(run_id, event):
+                        terminal_reached = True
+                        break
+
+                if not terminal_reached:
+                    if self.storage.is_cancel_requested(run_id):
+                        self._mark_cancelled(run_id, "分析被你手动停下来了。")
+                    else:
+                        self._complete_with_fallback(
+                            run_id,
+                            payload,
+                            classification,
+                            reason="主 Deep Agent 没有稳定产出结构化结论，已切到本地保守兜底。",
+                        )
+            except AgentConfigurationError as exc:
+                logger.exception(
+                    "Run failed because model configuration is missing",
+                    extra={
+                        "run_id": run_id,
+                        "category": classification.category,
+                        "status": "failed",
+                    },
+                )
+                self.storage.update_status(run_id, "failed", cancel_requested=False, error_message=str(exc))
+                self.storage.append_event(run_id, "error", {"message": str(exc)})
+            except Exception as exc:  # pragma: no cover
+                logger.exception(
+                    "Run failed inside deep agent execution",
+                    extra={
+                        "run_id": run_id,
+                        "category": classification.category,
+                        "status": "fallback",
+                    },
+                )
+                self._complete_with_fallback(
+                    run_id,
+                    payload,
+                    classification,
+                    reason=f"主 Deep Agent 运行时翻车了，已切到本地保守兜底：{exc}",
+                    emit_error_event=True,
+                )
+        finally:
+            final_run = self.storage.get_run(run_id)
+            logger.info(
+                "Finished processing run",
+                extra={
+                    "run_id": run_id,
+                    "category": final_run.category if final_run else None,
+                    "status": final_run.status if final_run else "missing",
+                    "duration_ms": int((time.monotonic() - started_at) * 1000),
+                },
             )
 
     def _handle_runtime_event(self, run_id: str, event: RuntimeStreamEvent) -> bool:
@@ -148,6 +209,7 @@ class RunManager:
                 error_message="",
             )
             self.storage.append_event(run_id, "verdict_ready", verdict.model_dump(mode="json"))
+            logger.info("Persisted verdict", extra={"run_id": run_id, "status": "completed"})
             return True
 
         if event.event_type == "cancelled":
@@ -168,6 +230,7 @@ class RunManager:
                     append_verdict_event=False,
                 )
             self.storage.append_event(run_id, "timeout", {"message": message})
+            logger.warning("Run timed out", extra={"run_id": run_id, "status": "timeout"})
             return True
 
         if event.event_type == "error":
@@ -179,6 +242,7 @@ class RunManager:
                 error_message=message,
             )
             self.storage.append_event(run_id, "error", {"message": message})
+            logger.error("Run emitted error event", extra={"run_id": run_id, "status": "failed"})
             return True
 
         self.storage.append_event(run_id, event.event_type, event.payload)
@@ -214,6 +278,14 @@ class RunManager:
             self.storage.append_event(run_id, "error", {"message": reason})
         elif append_verdict_event:
             self.storage.append_event(run_id, "verdict_ready", verdict.model_dump(mode="json"))
+        logger.warning(
+            "Completed run with fallback verdict",
+            extra={
+                "run_id": run_id,
+                "category": classification.category,
+                "status": "fallback",
+            },
+        )
 
     def _mark_cancelled(self, run_id: str, message: str) -> None:
         self.storage.update_status(
@@ -223,6 +295,7 @@ class RunManager:
             error_message=message,
         )
         self.storage.append_event(run_id, "cancelled", {"message": message})
+        logger.info("Cancelled run", extra={"run_id": run_id, "status": "cancelled"})
 
     def submit_clarification(self, run_id: str, answer: str) -> bool:
         updated = self.storage.add_clarification_answer(run_id, answer)
@@ -241,12 +314,20 @@ class RunManager:
             feedback.note,
         )
         self._update_memory_from_feedback(run.category, feedback)
+        logger.info(
+            "Stored run feedback",
+            extra={
+                "run_id": run_id,
+                "category": run.category,
+                "status": "feedback_recorded",
+            },
+        )
 
     def _update_memory_from_feedback(self, category: str, feedback: FeedbackRequest) -> None:
         if feedback.satisfaction_score >= 4 and feedback.regret_score <= 2:
             self.storage.upsert_preference(
                 f"{category}:positive",
-                f"你在 {category} 类决定里，通常更适合在信息够用时稳一点出手，而不是热血开团。",
+                f"你在 {category} 类决策里，通常更适合在信息够用时稳一点出手，而不是热血开团。",
                 delta=1,
             )
         if feedback.regret_score >= 4:

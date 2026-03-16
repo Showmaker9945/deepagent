@@ -115,6 +115,18 @@ class Storage:
                     count INTEGER NOT NULL DEFAULT 1,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE INDEX IF NOT EXISTS idx_runs_status_updated_at
+                ON runs(status, updated_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_run_events_run_id_id
+                ON run_events(run_id, id);
+
+                CREATE INDEX IF NOT EXISTS idx_run_sources_run_id_id
+                ON run_sources(run_id, id);
+
+                CREATE INDEX IF NOT EXISTS idx_feedback_run_id_created_at
+                ON feedback(run_id, created_at DESC);
                 """
             )
             self._ensure_column(connection, "runs", "cancel_requested", "INTEGER NOT NULL DEFAULT 0")
@@ -246,7 +258,10 @@ class Storage:
                     utcnow(),
                 ),
             )
-            return int(cursor.lastrowid)
+            lastrowid = cursor.lastrowid
+            if lastrowid is None:
+                raise RuntimeError("Failed to insert run source.")
+            return int(lastrowid)
 
     def request_cancel(self, run_id: str) -> bool:
         with self.connect() as connection:
@@ -425,6 +440,16 @@ class Storage:
 
     def get_memory_snapshot(self) -> PreferenceSnapshot:
         return compile_memory_snapshot(self.get_preferences(), self.get_regret_patterns())
+
+    def check_ready(self) -> tuple[bool, str | None]:
+        try:
+            with self.connect() as connection:
+                connection.execute("SELECT 1").fetchone()
+                connection.execute("BEGIN IMMEDIATE")
+                connection.rollback()
+            return True, None
+        except sqlite3.Error as exc:
+            return False, str(exc)
 
     def _row_to_event(self, row: sqlite3.Row) -> RunEvent:
         return RunEvent(

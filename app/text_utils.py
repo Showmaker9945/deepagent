@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 
-
 URL_PATTERN = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+", re.IGNORECASE)
 TRAILING_URL_PUNCTUATION = ".,;:!?)]}，。；：！？）】》」』"
 TIME_PATTERN = re.compile(

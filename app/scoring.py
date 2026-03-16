@@ -4,7 +4,6 @@ from typing import Any
 
 from app.schemas import Category, RunCreateRequest
 
-
 KEYWORD_GROUPS: dict[Category, dict[str, tuple[str, ...]]] = {
     "spending": {
         "necessity": ("need", "\u5fc5\u987b", "\u521a\u9700", "daily", "\u6bcf\u5929", "upgrade", "\u66ff\u6362"),

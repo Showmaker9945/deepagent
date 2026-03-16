@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from app.schemas import Category
 
-
 RUBRICS: dict[Category, str] = {
     "spending": "看必要性、使用频率、预算痛感、替代方案和后悔概率。",
     "travel": "看天气、时间成本、金钱成本、现场价值和更合适的时机。",

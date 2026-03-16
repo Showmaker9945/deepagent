@@ -275,3 +275,15 @@ def test_runtime_exception_uses_fallback_verdict():
         assert body["run"]["status"] == "completed"
         assert body["run"]["verdict"] is not None
         assert any(event["event_type"] == "error" for event in body["events"])
+
+
+def test_readyz_reports_storage_state():
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["db_ready"] is True
+    assert "has_dashscope_api_key" in body
+    assert "has_tavily_api_key" in body

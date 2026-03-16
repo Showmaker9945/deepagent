@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.text_utils import extract_urls
 
-
 Category = Literal["spending", "travel", "work_learning", "social", "unsupported"]
 RunStatus = Literal[
     "queued",

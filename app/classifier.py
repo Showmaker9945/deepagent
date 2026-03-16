@@ -3,7 +3,6 @@ from __future__ import annotations
 from app.schemas import Category, ClassificationResult, RunCreateRequest
 from app.text_utils import has_budget_signal, has_location_signal, has_time_signal, merge_text
 
-
 UNSUPPORTED_TERMS = {
     "medical",
     "\u8bca\u65ad",

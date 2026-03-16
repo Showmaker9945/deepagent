@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     app_name: str = "do or not"
     secret_key: str = Field(default="change-me", alias="SECRET_KEY")
     default_user_id: str = Field(default="local-user", alias="DEFAULT_USER_ID")
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     dashscope_api_key: str | None = Field(default=None, alias="DASHSCOPE_API_KEY")
     dashscope_base_url: str = Field(

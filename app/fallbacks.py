@@ -4,7 +4,6 @@ from typing import Any
 
 from app.schemas import Category, ClassificationResult, RunCreateRequest, RunVerdict
 
-
 DIMENSION_LABELS: dict[Category, dict[str, str]] = {
     "spending": {
         "necessity": "必要性",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -12,11 +13,13 @@ from fastapi.templating import Jinja2Templates
 
 from app.agents import DecisionAgentRuntime
 from app.config import settings
+from app.logging_utils import configure_logging
 from app.manager import RunManager
 from app.schemas import ClarificationRequest, FeedbackRequest, RunCreateRequest
 from app.storage import Storage
 
-
+configure_logging(settings.log_level)
+logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
@@ -29,7 +32,14 @@ async def lifespan(app: FastAPI):
     manager = RunManager(settings, storage, DecisionAgentRuntime(settings, storage))
     app.state.storage = storage
     app.state.manager = manager
+    logger.info(
+        "Application startup complete",
+        extra={
+            "status": "ready",
+        },
+    )
     yield
+    logger.info("Application shutdown complete", extra={"status": "stopped"})
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
@@ -160,3 +170,21 @@ async def stream_run(run_id: str, request: Request) -> StreamingResponse:
 @app.get("/healthz")
 async def healthz() -> JSONResponse:
     return JSONResponse({"ok": True})
+
+
+@app.get("/readyz")
+async def readyz(request: Request) -> JSONResponse:
+    storage: Storage = request.app.state.storage
+    db_ready, db_error = storage.check_ready()
+    payload = {
+        "ok": db_ready,
+        "db_ready": db_ready,
+        "db_path": str(storage.db_path),
+        "has_dashscope_api_key": bool(settings.dashscope_api_key),
+        "has_tavily_api_key": bool(settings.tavily_api_key),
+    }
+    if db_error:
+        payload["db_error"] = db_error
+        logger.warning("Readiness check failed", extra={"status": "not_ready"})
+        return JSONResponse(payload, status_code=503)
+    return JSONResponse(payload)

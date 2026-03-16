@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator
@@ -12,11 +13,13 @@ from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 from app.config import Settings
-from app.storage import Storage
 from app.prompts import build_main_prompt
-from app.scoring import score_tradeoff
 from app.schemas import ClassificationResult, RunCreateRequest, RunVerdict
+from app.scoring import score_tradeoff
+from app.storage import Storage
 from app.tools import ToolFactory, reset_tool_context, set_tool_context
+
+logger = logging.getLogger(__name__)
 
 
 class AgentConfigurationError(RuntimeError):
@@ -67,6 +70,13 @@ class DecisionAgentRuntime:
                 name=f"do-or-not-{classification.category}",
             )
             self._agents[key] = agent
+            logger.info(
+                "Created deep agent",
+                extra={
+                    "category": classification.category,
+                    "status": "created",
+                },
+            )
         return agent
 
     def run_streaming(
@@ -83,6 +93,14 @@ class DecisionAgentRuntime:
         memory_snapshot = self.storage.get_memory_snapshot().model_dump(mode="json")
         prompt = self._build_context_prompt(payload, classification, preflight_tradeoff, memory_snapshot)
         start_time = time.monotonic()
+        logger.info(
+            "Starting deep agent stream",
+            extra={
+                "run_id": run_id,
+                "category": classification.category,
+                "status": "running",
+            },
+        )
         token_buffer = ""
         context_token = set_tool_context(
             {
@@ -176,6 +194,15 @@ class DecisionAgentRuntime:
                 yield RuntimeStreamEvent("agent_token", {"text": token_buffer})
         finally:
             reset_tool_context(context_token)
+            logger.info(
+                "Deep agent stream finished",
+                extra={
+                    "run_id": run_id,
+                    "category": classification.category,
+                    "status": "finished",
+                    "duration_ms": int((time.monotonic() - start_time) * 1000),
+                },
+            )
 
     def _normalize_stream_item(self, item: Any) -> tuple[tuple[Any, ...], str, Any]:
         if isinstance(item, tuple) and len(item) == 3:

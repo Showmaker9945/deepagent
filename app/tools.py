@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import contextvars
 import json
+import logging
+import time
 from datetime import date
 from typing import Any
 
@@ -16,7 +18,7 @@ from app.config import Settings
 from app.schemas import Category, RunCreateRequest
 from app.scoring import score_tradeoff
 
-
+logger = logging.getLogger(__name__)
 CURRENT_TOOL_CONTEXT: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
     "do_or_not_tool_context",
     default={},
@@ -47,6 +49,16 @@ def emit_runtime_event(event_type: str, payload: dict[str, Any]) -> None:
 
 
 def emit_tool_started(tool_name: str, summary: str) -> None:
+    context = get_tool_context()
+    logger.info(
+        "Tool started",
+        extra={
+            "run_id": context.get("run_id"),
+            "category": context.get("category"),
+            "tool_name": tool_name,
+            "status": "started",
+        },
+    )
     emit_runtime_event(
         "tool_started",
         {
@@ -63,6 +75,25 @@ def emit_tool_finished(tool_name: str, status: str, summary: str, **extra: Any) 
         "summary": summary,
     }
     payload.update(extra)
+
+    context = get_tool_context()
+    level = logging.INFO
+    if status == "error":
+        level = logging.ERROR
+    elif status in {"blocked", "skipped", "unavailable", "not_found"}:
+        level = logging.WARNING
+
+    logger.log(
+        level,
+        "Tool finished",
+        extra={
+            "run_id": context.get("run_id"),
+            "category": context.get("category"),
+            "tool_name": tool_name,
+            "status": status,
+            "duration_ms": extra.get("duration_ms"),
+        },
+    )
     emit_runtime_event("tool_finished", payload)
 
 
@@ -86,6 +117,10 @@ def emit_source(
     )
 
 
+def elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
 class ToolFactory:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -105,11 +140,17 @@ class ToolFactory:
         def search_web(query: str) -> dict[str, Any]:
             """Search the public web for factual context."""
             tool_name = "search_web"
+            started_at = time.monotonic()
             context = get_tool_context()
             emit_tool_started(tool_name, f"搜索公开资料：{query[:120]}")
 
             if context.get("category") == "social" and not context.get("links"):
-                emit_tool_finished(tool_name, "skipped", "社交类问题默认不做公开网页搜索。")
+                emit_tool_finished(
+                    tool_name,
+                    "skipped",
+                    "社交类问题默认不做公开网页搜索。",
+                    duration_ms=elapsed_ms(started_at),
+                )
                 return {
                     "status": "skipped",
                     "reason": "Social questions should avoid public web search unless the user supplied links.",
@@ -117,7 +158,12 @@ class ToolFactory:
                 }
 
             if not settings.tavily_api_key:
-                emit_tool_finished(tool_name, "unavailable", "没有配置 Tavily Key，跳过联网搜索。")
+                emit_tool_finished(
+                    tool_name,
+                    "unavailable",
+                    "没有配置 Tavily Key，跳过联网搜索。",
+                    duration_ms=elapsed_ms(started_at),
+                )
                 return {
                     "status": "unavailable",
                     "reason": "TAVILY_API_KEY is not configured.",
@@ -153,14 +199,25 @@ class ToolFactory:
                         snippet=(item.get("content") or "")[:240] or None,
                         source_meta={"query": query},
                     )
-                emit_tool_finished(tool_name, "ok", f"搜到 {len(results)} 条公开资料。", count=len(results))
+                emit_tool_finished(
+                    tool_name,
+                    "ok",
+                    f"搜到 {len(results)} 条公开资料。",
+                    count=len(results),
+                    duration_ms=elapsed_ms(started_at),
+                )
                 return {
                     "status": "ok",
                     "query": query,
                     "results": results,
                 }
             except httpx.HTTPError as exc:
-                emit_tool_finished(tool_name, "error", f"联网搜索失败：{exc}")
+                emit_tool_finished(
+                    tool_name,
+                    "error",
+                    f"联网搜索失败：{exc}",
+                    duration_ms=elapsed_ms(started_at),
+                )
                 return {
                     "status": "error",
                     "query": query,
@@ -172,6 +229,7 @@ class ToolFactory:
         def fetch_url_content(url: str) -> dict[str, Any]:
             """Fetch and extract the main readable text from a URL."""
             tool_name = "fetch_url_content"
+            started_at = time.monotonic()
             emit_tool_started(tool_name, f"抓取链接正文：{url}")
             try:
                 response = httpx.get(
@@ -202,7 +260,13 @@ class ToolFactory:
                     snippet=content[:280] or None,
                     source_meta={"status": "ok"},
                 )
-                emit_tool_finished(tool_name, "ok", "链接正文已提取。", url=url)
+                emit_tool_finished(
+                    tool_name,
+                    "ok",
+                    "链接正文已提取。",
+                    url=url,
+                    duration_ms=elapsed_ms(started_at),
+                )
                 return {
                     "status": "ok",
                     "url": url,
@@ -210,7 +274,13 @@ class ToolFactory:
                     "content": content,
                 }
             except httpx.HTTPStatusError as exc:
-                emit_tool_finished(tool_name, "blocked", f"目标站点返回 HTTP {exc.response.status_code}。", url=url)
+                emit_tool_finished(
+                    tool_name,
+                    "blocked",
+                    f"目标站点返回 HTTP {exc.response.status_code}。",
+                    url=url,
+                    duration_ms=elapsed_ms(started_at),
+                )
                 return {
                     "status": "blocked",
                     "url": url,
@@ -219,7 +289,13 @@ class ToolFactory:
                     "reason": f"remote site returned HTTP {exc.response.status_code}",
                 }
             except httpx.HTTPError as exc:
-                emit_tool_finished(tool_name, "error", f"链接抓取失败：{exc}", url=url)
+                emit_tool_finished(
+                    tool_name,
+                    "error",
+                    f"链接抓取失败：{exc}",
+                    url=url,
+                    duration_ms=elapsed_ms(started_at),
+                )
                 return {
                     "status": "error",
                     "url": url,
@@ -232,6 +308,7 @@ class ToolFactory:
         def geocode_location(name: str) -> dict[str, Any]:
             """Convert a place name into coordinates and timezone."""
             tool_name = "geocode_location"
+            started_at = time.monotonic()
             emit_tool_started(tool_name, f"解析地点：{name}")
             try:
                 response = httpx.get(
@@ -243,7 +320,13 @@ class ToolFactory:
                 data = response.json()
                 results = data.get("results", [])
                 if not results:
-                    emit_tool_finished(tool_name, "not_found", "没有查到对应地点。", query=name)
+                    emit_tool_finished(
+                        tool_name,
+                        "not_found",
+                        "没有查到对应地点。",
+                        query=name,
+                        duration_ms=elapsed_ms(started_at),
+                    )
                     return {"status": "not_found", "query": name}
 
                 first = results[0]
@@ -265,16 +348,29 @@ class ToolFactory:
                         "longitude": first.get("longitude"),
                     },
                 )
-                emit_tool_finished(tool_name, "ok", "地点解析完成。", query=name)
+                emit_tool_finished(
+                    tool_name,
+                    "ok",
+                    "地点解析完成。",
+                    query=name,
+                    duration_ms=elapsed_ms(started_at),
+                )
                 return payload
             except httpx.HTTPError as exc:
-                emit_tool_finished(tool_name, "error", f"地点解析失败：{exc}", query=name)
+                emit_tool_finished(
+                    tool_name,
+                    "error",
+                    f"地点解析失败：{exc}",
+                    query=name,
+                    duration_ms=elapsed_ms(started_at),
+                )
                 return {"status": "error", "query": name, "reason": f"geocoding unavailable: {exc}"}
 
         @tool
         def get_weather(latitude: float, longitude: float, start_date: str = "", end_date: str = "") -> dict[str, Any]:
             """Get a small daily weather forecast for travel decisions."""
             tool_name = "get_weather"
+            started_at = time.monotonic()
             if not start_date:
                 start_date = date.today().isoformat()
             if not end_date:
@@ -308,7 +404,12 @@ class ToolFactory:
                         "end_date": end_date,
                     },
                 )
-                emit_tool_finished(tool_name, "ok", "天气数据已获取。")
+                emit_tool_finished(
+                    tool_name,
+                    "ok",
+                    "天气数据已获取。",
+                    duration_ms=elapsed_ms(started_at),
+                )
                 return {
                     "status": "ok",
                     "latitude": latitude,
@@ -317,7 +418,12 @@ class ToolFactory:
                     "timezone": data.get("timezone"),
                 }
             except httpx.HTTPError as exc:
-                emit_tool_finished(tool_name, "error", f"天气查询失败：{exc}")
+                emit_tool_finished(
+                    tool_name,
+                    "error",
+                    f"天气查询失败：{exc}",
+                    duration_ms=elapsed_ms(started_at),
+                )
                 return {
                     "status": "error",
                     "latitude": latitude,
@@ -338,7 +444,8 @@ class ToolFactory:
         ) -> dict[str, Any]:
             """Score a decision across a few deterministic dimensions."""
             tool_name = "score_tradeoff_tool"
-            emit_tool_started(tool_name, f"做一轮本地权衡打分：{category}")
+            started_at = time.monotonic()
+            emit_tool_started(tool_name, f"做一轮本地权重打分：{category}")
             try:
                 links = json.loads(links_json)
                 if not isinstance(links, list):
@@ -355,7 +462,12 @@ class ToolFactory:
                 links=[str(item) for item in links],
             )
             result = score_tradeoff(category, payload)
-            emit_tool_finished(tool_name, "ok", "本地打分完成。")
+            emit_tool_finished(
+                tool_name,
+                "ok",
+                "本地打分完成。",
+                duration_ms=elapsed_ms(started_at),
+            )
             return result
 
         return [search_web, fetch_url_content, geocode_location, get_weather, score_tradeoff_tool]
