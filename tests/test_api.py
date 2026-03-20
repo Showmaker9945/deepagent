@@ -1,6 +1,8 @@
 from fastapi.testclient import TestClient
 
 from app.agents import RuntimeStreamEvent
+from app.config import settings
+from app.langsmith_utils import is_langsmith_enabled
 from app.main import app
 from app.schemas import RunVerdict
 
@@ -255,7 +257,7 @@ def test_timeout_uses_fallback_verdict_and_keeps_timeout_event():
         assert body["run"]["status"] == "completed"
         assert body["run"]["verdict"] is not None
         assert any(event["event_type"] == "timeout" for event in body["events"])
-        assert any(source["title"] == "本地保守兜底" for source in body["sources"])
+        assert any(source["source_type"] == "tool_note" for source in body["sources"])
 
 
 def test_runtime_exception_uses_fallback_verdict():
@@ -287,3 +289,4 @@ def test_readyz_reports_storage_state():
     assert body["db_ready"] is True
     assert "has_dashscope_api_key" in body
     assert "has_tavily_api_key" in body
+    assert body["langsmith_enabled"] is is_langsmith_enabled(settings)

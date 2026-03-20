@@ -19,6 +19,7 @@ dependencies = [
   "langchain-openai>=0.3.0",
   "langgraph>=1.0.0",
   "langgraph-checkpoint-sqlite>=2.0.0",
+  "langsmith>=0.7.14",
   "pydantic-settings>=2.7.0",
   "readability-lxml>=0.8.1",
   "trafilatura>=2.0.0",

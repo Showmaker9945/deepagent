@@ -13,6 +13,13 @@ from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 from app.config import Settings
+from app.langsmith_utils import (
+    annotate_traced_span,
+    configure_langsmith,
+    end_traced_span,
+    make_trace_tags,
+    traced_span,
+)
 from app.prompts import build_main_prompt
 from app.schemas import ClassificationResult, RunCreateRequest, RunVerdict
 from app.scoring import score_tradeoff
@@ -36,6 +43,7 @@ class DecisionAgentRuntime:
     def __init__(self, settings: Settings, storage: Storage) -> None:
         self.settings = settings
         self.storage = storage
+        self.langsmith_status = configure_langsmith(settings)
         self.tools = ToolFactory(settings).build()
         self._model: ChatOpenAI | None = None
         self._agents: dict[tuple[str, bool], Any] = {}
@@ -44,7 +52,7 @@ class DecisionAgentRuntime:
         if self._model is not None:
             return self._model
         if not self.settings.dashscope_api_key:
-            raise AgentConfigurationError("缺少 `DASHSCOPE_API_KEY`，请先在 `.env` 里填好再运行。")
+            raise AgentConfigurationError("缺少 `DASHSCOPE_API_KEY`，请先在 `.env` 里配置后再运行。")
         api_key = SecretStr(self.settings.dashscope_api_key)
         self._model = ChatOpenAI(
             api_key=api_key,
@@ -89,7 +97,24 @@ class DecisionAgentRuntime:
         should_cancel: Callable[[], bool],
     ) -> Iterator[RuntimeStreamEvent]:
         agent = self._get_agent(classification)
-        preflight_tradeoff = score_tradeoff(classification.category, payload)
+        with traced_span(
+            self.settings,
+            name="preflight_tradeoff",
+            inputs=payload.model_dump(mode="json"),
+            tags=make_trace_tags(
+                self.settings,
+                "component:scoring",
+                f"category:{classification.category}",
+            ),
+            metadata={
+                "run_id": run_id,
+                "thread_id": run_id,
+                "category": classification.category,
+            },
+        ) as score_span:
+            preflight_tradeoff = score_tradeoff(classification.category, payload)
+            end_traced_span(score_span, outputs=preflight_tradeoff)
+
         memory_snapshot = self.storage.get_memory_snapshot().model_dump(mode="json")
         prompt = self._build_context_prompt(payload, classification, preflight_tradeoff, memory_snapshot)
         start_time = time.monotonic()
@@ -102,6 +127,13 @@ class DecisionAgentRuntime:
             },
         )
         token_buffer = ""
+        agent_result: dict[str, Any] = {
+            "status": "running",
+            "category": classification.category,
+            "preflight_average": preflight_tradeoff.get("average"),
+            "links_count": len(payload.links),
+            "model_name": self.settings.model_name,
+        }
         context_token = set_tool_context(
             {
                 "run_id": run_id,
@@ -112,86 +144,136 @@ class DecisionAgentRuntime:
         )
 
         try:
-            yield RuntimeStreamEvent(
-                "source_captured",
-                {
-                    "source_type": "tool_note",
-                    "title": "本地预分析",
-                    "url": None,
-                    "snippet": preflight_tradeoff.get("summary"),
-                    "source_meta": {
-                        "average": preflight_tradeoff.get("average"),
-                        "scores": preflight_tradeoff.get("scores", {}),
-                    },
+            with traced_span(
+                self.settings,
+                name="deepagent_stream",
+                inputs={
+                    "question": payload.question,
+                    "classification": classification.model_dump(mode="json"),
+                    "context_hints": self._build_context_hints(payload, classification),
+                    "preflight_tradeoff": preflight_tradeoff,
+                    "memory_snapshot": memory_snapshot,
                 },
-            )
-            yield RuntimeStreamEvent(
-                "agent_started",
-                {
+                tags=make_trace_tags(
+                    self.settings,
+                    "component:deepagent",
+                    f"category:{classification.category}",
+                ),
+                metadata={
+                    "run_id": run_id,
+                    "thread_id": run_id,
                     "category": classification.category,
-                    "mode": "deep_agent",
-                    "message": "主 Deep Agent 已接管，我先用本地预分析打底，再决定是否值得联网。",
+                    "ls_provider": "dashscope",
+                    "ls_model_name": self.settings.model_name,
+                    "humor_allowed": classification.humor_allowed,
                 },
-            )
-
-            if should_cancel():
-                yield RuntimeStreamEvent("cancelled", {"message": "分析已停止。"})
-                return
-
-            stream = agent.stream(
-                {"messages": [{"role": "user", "content": prompt}]},
-                config={"configurable": {"thread_id": run_id}},
-                stream_mode=["updates", "messages", "custom"],
-                subgraphs=True,
-            )
-
-            for item in stream:
-                if should_cancel():
-                    if token_buffer.strip():
-                        yield RuntimeStreamEvent("agent_token", {"text": token_buffer})
-                        token_buffer = ""
-                    yield RuntimeStreamEvent("cancelled", {"message": "用户已主动停止分析。"})
-                    return
-
-                if time.monotonic() - start_time > timeout_seconds:
-                    if token_buffer.strip():
-                        yield RuntimeStreamEvent("agent_token", {"text": token_buffer})
-                        token_buffer = ""
+            ) as agent_span:
+                annotate_traced_span(
+                    agent_span,
+                    metadata={
+                        "memory_profile_present": "No persistent preferences yet." not in memory_snapshot["profile_markdown"],
+                        "memory_regret_present": "No regret patterns recorded yet." not in memory_snapshot["regret_markdown"],
+                    },
+                )
+                try:
                     yield RuntimeStreamEvent(
-                        "timeout",
-                        {"message": f"本轮分析超过 {timeout_seconds} 秒，已自动收手。"},
+                        "source_captured",
+                        {
+                            "source_type": "tool_note",
+                            "title": "本地预打分",
+                            "url": None,
+                            "snippet": preflight_tradeoff.get("summary"),
+                            "source_meta": {
+                                "average": preflight_tradeoff.get("average"),
+                                "scores": preflight_tradeoff.get("scores", {}),
+                            },
+                        },
                     )
-                    return
+                    yield RuntimeStreamEvent(
+                        "agent_started",
+                        {
+                            "category": classification.category,
+                            "mode": "deep_agent",
+                            "message": "Deep Agent 已接管，我会先参考本地预打分，再决定是否需要联网。",
+                        },
+                    )
 
-                _, mode, data = self._normalize_stream_item(item)
-
-                if mode == "messages":
-                    text = self._extract_message_text(data[0])
-                    if text:
-                        token_buffer += text
-                        if len(token_buffer) >= 80 or token_buffer.endswith(("。", "！", "？", "\n")):
-                            yield RuntimeStreamEvent("agent_token", {"text": token_buffer})
-                            token_buffer = ""
-                    continue
-
-                if mode == "custom":
-                    custom_event = self._parse_custom_event(data)
-                    if custom_event is not None:
-                        yield custom_event
-                    continue
-
-                if mode == "updates":
-                    structured = self._extract_structured_response(data)
-                    if structured is not None:
-                        if token_buffer.strip():
-                            yield RuntimeStreamEvent("agent_token", {"text": token_buffer})
-                            token_buffer = ""
-                        verdict = RunVerdict.model_validate(structured)
-                        yield RuntimeStreamEvent("verdict_ready", verdict.model_dump(mode="json"))
+                    if should_cancel():
+                        agent_result["status"] = "cancelled"
+                        yield RuntimeStreamEvent("cancelled", {"message": "分析已取消。"})
                         return
 
-            if token_buffer.strip():
-                yield RuntimeStreamEvent("agent_token", {"text": token_buffer})
+                    stream = agent.stream(
+                        {"messages": [{"role": "user", "content": prompt}]},
+                        config={"configurable": {"thread_id": run_id}},
+                        stream_mode=["updates", "messages", "custom"],
+                        subgraphs=True,
+                    )
+
+                    for item in stream:
+                        if should_cancel():
+                            if token_buffer.strip():
+                                yield RuntimeStreamEvent("agent_token", {"text": token_buffer})
+                                token_buffer = ""
+                            agent_result["status"] = "cancelled"
+                            yield RuntimeStreamEvent("cancelled", {"message": "用户主动停止了这轮分析。"})
+                            return
+
+                        if time.monotonic() - start_time > timeout_seconds:
+                            if token_buffer.strip():
+                                yield RuntimeStreamEvent("agent_token", {"text": token_buffer})
+                                token_buffer = ""
+                            agent_result["status"] = "timed_out"
+                            yield RuntimeStreamEvent(
+                                "timeout",
+                                {"message": f"本轮分析超过 {timeout_seconds} 秒，系统已自动收手。"},
+                            )
+                            return
+
+                        _, mode, data = self._normalize_stream_item(item)
+
+                        if mode == "messages":
+                            text = self._extract_message_text(data[0])
+                            if text:
+                                token_buffer += text
+                                if len(token_buffer) >= 80 or token_buffer.endswith(("。", "！", "？", "\n")):
+                                    yield RuntimeStreamEvent("agent_token", {"text": token_buffer})
+                                    token_buffer = ""
+                            continue
+
+                        if mode == "custom":
+                            custom_event = self._parse_custom_event(data)
+                            if custom_event is not None:
+                                yield custom_event
+                            continue
+
+                        if mode == "updates":
+                            structured = self._extract_structured_response(data)
+                            if structured is not None:
+                                if token_buffer.strip():
+                                    yield RuntimeStreamEvent("agent_token", {"text": token_buffer})
+                                    token_buffer = ""
+                                verdict = RunVerdict.model_validate(structured)
+                                agent_result["status"] = "completed"
+                                agent_result["verdict"] = verdict.model_dump(mode="json")
+                                yield RuntimeStreamEvent("verdict_ready", verdict.model_dump(mode="json"))
+                                return
+
+                    if token_buffer.strip():
+                        yield RuntimeStreamEvent("agent_token", {"text": token_buffer})
+
+                    agent_result["status"] = "no_structured_output"
+                except Exception as exc:
+                    agent_result["status"] = "error"
+                    agent_result["error"] = str(exc)
+                    raise
+                finally:
+                    agent_result["duration_ms"] = int((time.monotonic() - start_time) * 1000)
+                    end_traced_span(
+                        agent_span,
+                        outputs=agent_result,
+                        error=agent_result.get("error"),
+                    )
         finally:
             reset_tool_context(context_token)
             logger.info(
@@ -275,9 +357,9 @@ class DecisionAgentRuntime:
             "preflight_tradeoff": preflight_tradeoff,
         }
         return (
-            "请帮我判断这件事到底做还是不做。必要时使用工具补充事实，但不要过度开工。"
-            "你已经拿到一份本地预分析分数，请先基于它思考；只有它解决不了的问题，再考虑工具。"
-            "如果证据不完整，也要先给出尽力而为的判断。以下是上下文：\n"
+            "请帮我判断这件事到底做还是不做。必要时可以使用工具补充事实，但不要过度开工。"
+            "你已经拿到一份本地预打分，请先基于它思考；只有它解决不了的问题，再考虑工具。"
+            "如果证据还不完整，也要先给出尽力而为的判断。以下是上下文：\n"
             f"{json.dumps(context, ensure_ascii=False, indent=2)}"
         )
 

@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.agents import DecisionAgentRuntime
 from app.config import settings
+from app.langsmith_utils import configure_langsmith, flush_langsmith_traces, is_langsmith_enabled
 from app.logging_utils import configure_logging
 from app.manager import RunManager
 from app.schemas import ClarificationRequest, FeedbackRequest, RunCreateRequest
@@ -26,6 +27,11 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    langsmith_status = configure_langsmith(settings)
+    logger.info(
+        "LangSmith tracing status",
+        extra={"status": "enabled" if langsmith_status.enabled else "disabled"},
+    )
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     storage = Storage(settings.sqlite_db_path)
     storage.init_db()
@@ -39,6 +45,10 @@ async def lifespan(app: FastAPI):
         },
     )
     yield
+    try:
+        flush_langsmith_traces(settings)
+    except Exception:  # pragma: no cover
+        logger.exception("Failed to flush LangSmith traces during shutdown", extra={"status": "error"})
     logger.info("Application shutdown complete", extra={"status": "stopped"})
 
 
@@ -182,6 +192,7 @@ async def readyz(request: Request) -> JSONResponse:
         "db_path": str(storage.db_path),
         "has_dashscope_api_key": bool(settings.dashscope_api_key),
         "has_tavily_api_key": bool(settings.tavily_api_key),
+        "langsmith_enabled": is_langsmith_enabled(settings),
     }
     if db_error:
         payload["db_error"] = db_error
