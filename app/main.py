@@ -35,7 +35,8 @@ async def lifespan(app: FastAPI):
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     storage = Storage(settings.sqlite_db_path)
     storage.init_db()
-    manager = RunManager(settings, storage, DecisionAgentRuntime(settings, storage))
+    runtime = DecisionAgentRuntime(settings, storage)
+    manager = RunManager(settings, storage, runtime)
     app.state.storage = storage
     app.state.manager = manager
     logger.info(
@@ -49,6 +50,7 @@ async def lifespan(app: FastAPI):
         flush_langsmith_traces(settings)
     except Exception:  # pragma: no cover
         logger.exception("Failed to flush LangSmith traces during shutdown", extra={"status": "error"})
+    runtime.close()
     logger.info("Application shutdown complete", extra={"status": "stopped"})
 
 

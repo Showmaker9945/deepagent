@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
+import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator
 
 from deepagents import create_deep_agent
 from deepagents.backends import StateBackend
+from deepagents.backends.composite import CompositeBackend
+from deepagents.backends.filesystem import FilesystemBackend
 from langchain.agents.structured_output import ToolStrategy
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.sqlite import SqliteSaver
 from pydantic import SecretStr
 
 from app.config import Settings
@@ -27,6 +33,173 @@ from app.storage import Storage
 from app.tools import ToolFactory, reset_tool_context, set_tool_context
 
 logger = logging.getLogger(__name__)
+APP_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = APP_DIR.parent
+DEEPAGENT_SKILL_SOURCES = ["/skills/base/", "/skills/project/"]
+SKILL_ROUTE_ROOTS = {
+    "/skills/base/": PROJECT_ROOT / "skills" / "base",
+    "/skills/project/": PROJECT_ROOT / "skills" / "project",
+}
+EMPTY_PROFILE_MEMORY = "No persistent preferences yet."
+EMPTY_REGRET_MEMORY = "No regret patterns recorded yet."
+CURRENT_SKILL_TRACE: contextvars.ContextVar["SkillTraceSnapshot | None"] = contextvars.ContextVar(
+    "do_or_not_skill_trace",
+    default=None,
+)
+
+
+@dataclass(slots=True)
+class SkillTraceSnapshot:
+    available_skills: list[dict[str, str]]
+    candidate_skill_names: list[str]
+    metadata_scan_paths: list[str] = field(default_factory=list)
+    metadata_load_paths: list[str] = field(default_factory=list)
+    metadata_load_names: list[str] = field(default_factory=list)
+    read_paths: list[str] = field(default_factory=list)
+    read_names: list[str] = field(default_factory=list)
+
+    def record_scan(self, path: str) -> None:
+        _append_unique(self.metadata_scan_paths, path)
+
+    def record_metadata_load(self, path: str) -> None:
+        _append_unique(self.metadata_load_paths, path)
+        _append_unique(self.metadata_load_names, PurePosixPath(path).parent.name)
+
+    def record_read(self, path: str) -> None:
+        _append_unique(self.read_paths, path)
+        _append_unique(self.read_names, PurePosixPath(path).parent.name)
+
+    def to_metadata(self) -> dict[str, Any]:
+        return {
+            "skill_sources": list(DEEPAGENT_SKILL_SOURCES),
+            "available_skill_names": [item["name"] for item in self.available_skills],
+            "available_skills": self.available_skills,
+            "candidate_skill_names": list(self.candidate_skill_names),
+            "metadata_scan_paths": list(self.metadata_scan_paths),
+            "metadata_load_paths": list(self.metadata_load_paths),
+            "metadata_load_names": list(self.metadata_load_names),
+            "skill_read_paths": list(self.read_paths),
+            "skill_read_names": list(self.read_names),
+            "skill_read_count": len(self.read_names),
+        }
+
+    def to_tags(self) -> list[str]:
+        tags = [f"skill_candidate:{name}" for name in self.candidate_skill_names]
+        tags.extend(f"skill_read:{name}" for name in self.read_names)
+        if self.read_names:
+            tags.append("skills:read")
+        elif self.candidate_skill_names:
+            tags.append("skills:candidate_only")
+        else:
+            tags.append("skills:none")
+        return tags
+
+
+def collect_registered_skill_catalog() -> list[dict[str, str]]:
+    catalog: list[dict[str, str]] = []
+    for source_path, route_root in SKILL_ROUTE_ROOTS.items():
+        if not route_root.exists():
+            continue
+        source_name = PurePosixPath(source_path.rstrip("/")).name
+        for skill_dir in sorted(route_root.iterdir(), key=lambda item: item.name):
+            skill_file = skill_dir / "SKILL.md"
+            if not skill_dir.is_dir() or not skill_file.exists():
+                continue
+            catalog.append(
+                {
+                    "name": skill_dir.name,
+                    "path": f"{source_path}{skill_dir.name}/SKILL.md",
+                    "source": source_name,
+                }
+            )
+    return catalog
+
+
+def select_skill_candidates(
+    payload: RunCreateRequest,
+    classification: ClassificationResult,
+    memory_snapshot: dict[str, str],
+) -> list[str]:
+    candidates: list[str] = []
+    has_memory = (
+        memory_snapshot.get("profile_markdown", "").strip() != EMPTY_PROFILE_MEMORY
+        or memory_snapshot.get("regret_markdown", "").strip() != EMPTY_REGRET_MEMORY
+    )
+    if payload.links or (classification.category == "travel" and bool(payload.location)):
+        candidates.append("link-first-research")
+    if classification.category != "unsupported" and has_memory:
+        candidates.append("memory-regret-check")
+    return candidates
+
+
+def begin_skill_trace(
+    available_skills: list[dict[str, str]],
+    candidate_skill_names: list[str],
+) -> contextvars.Token:
+    return CURRENT_SKILL_TRACE.set(
+        SkillTraceSnapshot(
+            available_skills=available_skills,
+            candidate_skill_names=candidate_skill_names,
+        )
+    )
+
+
+def get_skill_trace_snapshot() -> SkillTraceSnapshot | None:
+    return CURRENT_SKILL_TRACE.get()
+
+
+def reset_skill_trace(token: contextvars.Token) -> None:
+    CURRENT_SKILL_TRACE.reset(token)
+
+
+def _append_unique(items: list[str], value: str) -> None:
+    if value and value not in items:
+        items.append(value)
+
+
+class SkillTracingFilesystemBackend(FilesystemBackend):
+    def __init__(self, *, route_prefix: str, root_dir: Path) -> None:
+        super().__init__(root_dir=root_dir, virtual_mode=True)
+        self.route_prefix = route_prefix
+
+    def ls_info(self, path: str) -> list[dict[str, Any]]:
+        snapshot = get_skill_trace_snapshot()
+        if snapshot is not None:
+            snapshot.record_scan(self._restore_virtual_path(path))
+        return super().ls_info(path)
+
+    def download_files(self, paths: list[str]) -> list[Any]:
+        snapshot = get_skill_trace_snapshot()
+        if snapshot is not None:
+            for path in paths:
+                restored = self._restore_virtual_path(path)
+                if restored.endswith("/SKILL.md"):
+                    snapshot.record_metadata_load(restored)
+        return super().download_files(paths)
+
+    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
+        snapshot = get_skill_trace_snapshot()
+        if snapshot is not None:
+            restored = self._restore_virtual_path(file_path)
+            if restored.endswith("/SKILL.md"):
+                snapshot.record_read(restored)
+        return super().read(file_path, offset=offset, limit=limit)
+
+    def _restore_virtual_path(self, path: str) -> str:
+        normalized = path if path.startswith("/") else f"/{path}"
+        if normalized == "/":
+            return self.route_prefix
+        return f"{self.route_prefix.rstrip('/')}{normalized}"
+
+
+def build_deepagent_backend(runtime: Any) -> CompositeBackend:
+    return CompositeBackend(
+        default=StateBackend(runtime),
+        routes={
+            route_prefix: SkillTracingFilesystemBackend(route_prefix=route_prefix, root_dir=route_root)
+            for route_prefix, route_root in SKILL_ROUTE_ROOTS.items()
+        },
+    )
 
 
 class AgentConfigurationError(RuntimeError):
@@ -46,6 +219,8 @@ class DecisionAgentRuntime:
         self.langsmith_status = configure_langsmith(settings)
         self.tools = ToolFactory(settings).build()
         self._model: ChatOpenAI | None = None
+        self._checkpoint_conn: sqlite3.Connection | None = None
+        self._checkpointer: SqliteSaver | None = None
         self._agents: dict[tuple[str, bool], Any] = {}
 
     def _require_model(self) -> ChatOpenAI:
@@ -65,6 +240,30 @@ class DecisionAgentRuntime:
         )
         return self._model
 
+    def _require_checkpointer(self) -> SqliteSaver:
+        if self._checkpointer is not None:
+            return self._checkpointer
+
+        checkpoint_path = self.settings.checkpoint_db_path
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(checkpoint_path, check_same_thread=False)
+        connection.execute("PRAGMA journal_mode=WAL;")
+        checkpointer = SqliteSaver(connection)
+        checkpointer.setup()
+        self._checkpoint_conn = connection
+        self._checkpointer = checkpointer
+        return checkpointer
+
+    def close(self) -> None:
+        self._agents.clear()
+        self._checkpointer = None
+        if self._checkpoint_conn is None:
+            return
+        try:
+            self._checkpoint_conn.close()
+        finally:
+            self._checkpoint_conn = None
+
     def _get_agent(self, classification: ClassificationResult):
         key = (classification.category, classification.humor_allowed)
         agent = self._agents.get(key)
@@ -73,8 +272,10 @@ class DecisionAgentRuntime:
                 model=self._require_model(),
                 tools=self.tools,
                 system_prompt=build_main_prompt(classification.category, classification.humor_allowed),
+                skills=DEEPAGENT_SKILL_SOURCES,
                 response_format=ToolStrategy(RunVerdict),
-                backend=StateBackend,
+                checkpointer=self._require_checkpointer(),
+                backend=build_deepagent_backend,
                 name=f"do-or-not-{classification.category}",
             )
             self._agents[key] = agent
@@ -116,6 +317,8 @@ class DecisionAgentRuntime:
             end_traced_span(score_span, outputs=preflight_tradeoff)
 
         memory_snapshot = self.storage.get_memory_snapshot().model_dump(mode="json")
+        available_skills = collect_registered_skill_catalog()
+        candidate_skill_names = select_skill_candidates(payload, classification, memory_snapshot)
         prompt = self._build_context_prompt(payload, classification, preflight_tradeoff, memory_snapshot)
         start_time = time.monotonic()
         logger.info(
@@ -142,6 +345,7 @@ class DecisionAgentRuntime:
                 "preflight_tradeoff": preflight_tradeoff,
             }
         )
+        skill_trace_token = begin_skill_trace(available_skills, candidate_skill_names)
 
         try:
             with traced_span(
@@ -166,6 +370,8 @@ class DecisionAgentRuntime:
                     "ls_provider": "dashscope",
                     "ls_model_name": self.settings.model_name,
                     "humor_allowed": classification.humor_allowed,
+                    "available_skill_names": [item["name"] for item in available_skills],
+                    "candidate_skill_names": candidate_skill_names,
                 },
             ) as agent_span:
                 annotate_traced_span(
@@ -268,6 +474,17 @@ class DecisionAgentRuntime:
                     agent_result["error"] = str(exc)
                     raise
                 finally:
+                    skill_snapshot = get_skill_trace_snapshot()
+                    if skill_snapshot is not None:
+                        agent_result["available_skill_names"] = [item["name"] for item in skill_snapshot.available_skills]
+                        agent_result["candidate_skill_names"] = list(skill_snapshot.candidate_skill_names)
+                        agent_result["metadata_load_names"] = list(skill_snapshot.metadata_load_names)
+                        agent_result["skill_read_names"] = list(skill_snapshot.read_names)
+                        annotate_traced_span(
+                            agent_span,
+                            metadata=skill_snapshot.to_metadata(),
+                            tags=skill_snapshot.to_tags(),
+                        )
                     agent_result["duration_ms"] = int((time.monotonic() - start_time) * 1000)
                     end_traced_span(
                         agent_span,
@@ -275,6 +492,7 @@ class DecisionAgentRuntime:
                         error=agent_result.get("error"),
                     )
         finally:
+            reset_skill_trace(skill_trace_token)
             reset_tool_context(context_token)
             logger.info(
                 "Deep agent stream finished",
