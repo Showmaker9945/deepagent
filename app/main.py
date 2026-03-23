@@ -6,7 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -18,6 +18,7 @@ from app.logging_utils import configure_logging
 from app.manager import RunManager
 from app.schemas import ClarificationRequest, FeedbackRequest, RunCreateRequest
 from app.storage import Storage
+from app.uploads import persist_uploaded_image
 
 configure_logging(settings.log_level)
 logger = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ async def lifespan(app: FastAPI):
         extra={"status": "enabled" if langsmith_status.enabled else "disabled"},
     )
     settings.data_dir.mkdir(parents=True, exist_ok=True)
+    settings.uploads_dir.mkdir(parents=True, exist_ok=True)
     storage = Storage(settings.sqlite_db_path)
     storage.init_db()
     runtime = DecisionAgentRuntime(settings, storage)
@@ -73,9 +75,31 @@ async def index(request: Request) -> HTMLResponse:
 @app.post("/api/runs")
 async def create_run(payload: RunCreateRequest, background_tasks: BackgroundTasks, request: Request) -> JSONResponse:
     manager: RunManager = request.app.state.manager
-    run_id = manager.start_run(payload)
+    try:
+        run_id = manager.start_run(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     background_tasks.add_task(manager.process_run, run_id)
     return JSONResponse({"run_id": run_id})
+
+
+@app.post("/api/uploads")
+async def upload_image(request: Request, file: UploadFile = File(...)) -> JSONResponse:
+    storage: Storage = request.app.state.storage
+    try:
+        image = persist_uploaded_image(
+            settings,
+            storage,
+            file_name=file.filename,
+            mime_type=file.content_type,
+            content=await file.read(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        await file.close()
+
+    return JSONResponse(image.model_dump(mode="json"))
 
 
 @app.get("/api/runs/{run_id}")

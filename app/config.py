@@ -21,8 +21,11 @@ class Settings(BaseSettings):
         alias="DASHSCOPE_BASE_URL",
     )
     model_name: str = Field(default="qwen3-max", alias="MODEL_NAME")
+    vision_model_name: str | None = Field(default=None, alias="VISION_MODEL_NAME")
     model_timeout_seconds: int = Field(default=18, alias="MODEL_TIMEOUT_SECONDS")
     run_timeout_seconds: int = Field(default=45, alias="RUN_TIMEOUT_SECONDS")
+    upload_max_image_bytes: int = Field(default=5_000_000, alias="UPLOAD_MAX_IMAGE_BYTES")
+    upload_max_image_count: int = Field(default=3, alias="UPLOAD_MAX_IMAGE_COUNT")
     tavily_api_key: str | None = Field(default=None, alias="TAVILY_API_KEY")
     langsmith_tracing: bool = Field(default=False, alias="LANGSMITH_TRACING")
     langsmith_otel_enabled: bool = Field(default=True, alias="LANGSMITH_OTEL_ENABLED")
@@ -33,6 +36,7 @@ class Settings(BaseSettings):
 
     sqlite_db_path: Path = Field(default=Path("./data/do_or_not.db"), alias="SQLITE_DB_PATH")
     checkpoint_db_path: Path = Field(default=Path("./data/checkpoints.db"), alias="CHECKPOINT_DB_PATH")
+    uploads_dir: Path = Field(default=Path("./data/uploads"), alias="UPLOADS_DIR")
 
     @property
     def data_dir(self) -> Path:

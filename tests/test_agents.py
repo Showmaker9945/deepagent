@@ -15,7 +15,7 @@ from app.agents import (
     select_skill_candidates,
 )
 from app.config import Settings
-from app.schemas import ClassificationResult, RunCreateRequest
+from app.schemas import ClassificationResult, RunCreateRequest, VisualReport
 from app.storage import Storage
 
 
@@ -72,6 +72,52 @@ def test_run_streaming_includes_feedback_memory_in_prompt(tmp_path, monkeypatch)
     assert "memory_snapshot" in fake_agent.prompt
     assert "Prefer a smaller first step." in fake_agent.prompt
     assert "Regret overcommitting before validating." in fake_agent.prompt
+
+
+def test_run_streaming_includes_visual_report_in_prompt(tmp_path, monkeypatch):
+    storage = Storage(tmp_path / "agent.db")
+    storage.init_db()
+    storage.create_image_upload(
+        image_id="img-1",
+        file_name="poster.png",
+        mime_type="image/png",
+        local_path=str(tmp_path / "poster.png"),
+        size_bytes=128,
+    )
+    payload = RunCreateRequest(question="这个活动要不要去？", image_ids=["img-1"])
+    run_id = storage.create_run(payload, "user-1")
+
+    runtime = DecisionAgentRuntime(Settings(), storage)
+    fake_agent = FakeStreamingAgent()
+    monkeypatch.setattr(runtime, "_get_agent", lambda classification: fake_agent)
+    monkeypatch.setattr(
+        runtime,
+        "_build_visual_report",
+        lambda run_id, payload, classification, images: VisualReport(
+            summary="海报里写了时间、地点和票价。",
+            extracted_facts=["时间是周六 19:30", "地点在静安", "票价 180 元"],
+            uncertainties=["没有看到退票规则"],
+            image_count=len(images),
+        ),
+    )
+
+    classification = ClassificationResult(category="travel", reason="stub")
+    events = list(
+        runtime.run_streaming(
+            run_id,
+            payload,
+            classification,
+            timeout_seconds=5,
+            should_cancel=lambda: False,
+        )
+    )
+
+    assert any(event.event_type == "verdict_ready" for event in events)
+    assert any(event.event_type == "tool_started" and event.payload["tool_name"] == "image_evidence_intake" for event in events)
+    assert fake_agent.prompt is not None
+    assert "visual_report" in fake_agent.prompt
+    assert "海报里写了时间、地点和票价。" in fake_agent.prompt
+    assert "poster.png" in fake_agent.prompt
 
 
 def test_get_agent_registers_disk_backed_skills(tmp_path, monkeypatch):
@@ -144,6 +190,7 @@ def test_collect_registered_skill_catalog_lists_bundled_skills():
     catalog = collect_registered_skill_catalog()
     names = {item["name"] for item in catalog}
 
+    assert "image-evidence-intake" in names
     assert "link-first-research" in names
     assert "memory-regret-check" in names
 
@@ -162,6 +209,22 @@ def test_select_skill_candidates_uses_links_and_memory():
     candidates = select_skill_candidates(payload, classification, memory_snapshot)
 
     assert candidates == ["link-first-research", "memory-regret-check"]
+
+
+def test_select_skill_candidates_prioritizes_uploaded_images():
+    payload = RunCreateRequest(
+        question="这张海报上的活动要不要去？",
+        image_ids=["img-1"],
+    )
+    classification = ClassificationResult(category="travel", reason="stub")
+    memory_snapshot = {
+        "profile_markdown": "No persistent preferences yet.",
+        "regret_markdown": "No regret patterns recorded yet.",
+    }
+
+    candidates = select_skill_candidates(payload, classification, memory_snapshot)
+
+    assert candidates == ["image-evidence-intake"]
 
 
 def test_skill_tracing_backend_records_scan_load_and_read(tmp_path):

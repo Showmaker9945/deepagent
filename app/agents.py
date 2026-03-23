@@ -27,10 +27,11 @@ from app.langsmith_utils import (
     traced_span,
 )
 from app.prompts import build_main_prompt
-from app.schemas import ClassificationResult, RunCreateRequest, RunVerdict
+from app.schemas import ClassificationResult, RunCreateRequest, RunImage, RunVerdict, VisualReport
 from app.scoring import score_tradeoff
 from app.storage import Storage
 from app.tools import ToolFactory, reset_tool_context, set_tool_context
+from app.visual import VisualAnalyzer
 
 logger = logging.getLogger(__name__)
 APP_DIR = Path(__file__).resolve().parent
@@ -125,6 +126,8 @@ def select_skill_candidates(
         memory_snapshot.get("profile_markdown", "").strip() != EMPTY_PROFILE_MEMORY
         or memory_snapshot.get("regret_markdown", "").strip() != EMPTY_REGRET_MEMORY
     )
+    if payload.image_ids:
+        candidates.append("image-evidence-intake")
     if payload.links or (classification.category == "travel" and bool(payload.location)):
         candidates.append("link-first-research")
     if classification.category != "unsupported" and has_memory:
@@ -218,6 +221,7 @@ class DecisionAgentRuntime:
         self.storage = storage
         self.langsmith_status = configure_langsmith(settings)
         self.tools = ToolFactory(settings).build()
+        self.visual_analyzer = VisualAnalyzer(settings)
         self._model: ChatOpenAI | None = None
         self._checkpoint_conn: sqlite3.Connection | None = None
         self._checkpointer: SqliteSaver | None = None
@@ -316,10 +320,11 @@ class DecisionAgentRuntime:
             preflight_tradeoff = score_tradeoff(classification.category, payload)
             end_traced_span(score_span, outputs=preflight_tradeoff)
 
+        images = self.storage.list_images(run_id)
+        visual_report: VisualReport | None = None
         memory_snapshot = self.storage.get_memory_snapshot().model_dump(mode="json")
         available_skills = collect_registered_skill_catalog()
         candidate_skill_names = select_skill_candidates(payload, classification, memory_snapshot)
-        prompt = self._build_context_prompt(payload, classification, preflight_tradeoff, memory_snapshot)
         start_time = time.monotonic()
         logger.info(
             "Starting deep agent stream",
@@ -335,6 +340,7 @@ class DecisionAgentRuntime:
             "category": classification.category,
             "preflight_average": preflight_tradeoff.get("average"),
             "links_count": len(payload.links),
+            "image_count": len(images),
             "model_name": self.settings.model_name,
         }
         context_token = set_tool_context(
@@ -342,6 +348,7 @@ class DecisionAgentRuntime:
                 "run_id": run_id,
                 "category": classification.category,
                 "links": payload.links,
+                "image_ids": payload.image_ids,
                 "preflight_tradeoff": preflight_tradeoff,
             }
         )
@@ -357,6 +364,8 @@ class DecisionAgentRuntime:
                     "context_hints": self._build_context_hints(payload, classification),
                     "preflight_tradeoff": preflight_tradeoff,
                     "memory_snapshot": memory_snapshot,
+                    "image_inputs": self._serialize_image_inputs(images),
+                    "visual_report": visual_report.model_dump(mode="json") if visual_report is not None else None,
                 },
                 tags=make_trace_tags(
                     self.settings,
@@ -370,6 +379,9 @@ class DecisionAgentRuntime:
                     "ls_provider": "dashscope",
                     "ls_model_name": self.settings.model_name,
                     "humor_allowed": classification.humor_allowed,
+                    "image_count": len(images),
+                    "image_names": [image.file_name for image in images],
+                    "visual_report_present": visual_report is not None,
                     "available_skill_names": [item["name"] for item in available_skills],
                     "candidate_skill_names": candidate_skill_names,
                 },
@@ -379,6 +391,7 @@ class DecisionAgentRuntime:
                     metadata={
                         "memory_profile_present": "No persistent preferences yet." not in memory_snapshot["profile_markdown"],
                         "memory_regret_present": "No regret patterns recorded yet." not in memory_snapshot["regret_markdown"],
+                        "visual_uncertainty_count": len(visual_report.uncertainties) if visual_report is not None else 0,
                     },
                 )
                 try:
@@ -394,6 +407,54 @@ class DecisionAgentRuntime:
                                 "scores": preflight_tradeoff.get("scores", {}),
                             },
                         },
+                    )
+                    if images:
+                        yield RuntimeStreamEvent(
+                            "tool_started",
+                            {
+                                "tool_name": "image_evidence_intake",
+                                "summary": f"正在整理你上传的 {len(images)} 张图片证据。",
+                            },
+                        )
+                        visual_report = self._build_visual_report(run_id, payload, classification, images)
+                        if visual_report is not None:
+                            self.storage.update_status(run_id, "running", visual_report=visual_report)
+                            annotate_traced_span(
+                                agent_span,
+                                metadata={
+                                    "visual_report_present": True,
+                                    "visual_uncertainty_count": len(visual_report.uncertainties),
+                                },
+                            )
+                            yield RuntimeStreamEvent(
+                                "source_captured",
+                                {
+                                    "source_type": "tool_note",
+                                    "title": "图片证据摘要",
+                                    "url": None,
+                                    "snippet": visual_report.summary,
+                                    "source_meta": {
+                                        "image_count": visual_report.image_count,
+                                        "facts": visual_report.extracted_facts,
+                                        "uncertainties": visual_report.uncertainties,
+                                    },
+                                },
+                            )
+                        yield RuntimeStreamEvent(
+                            "tool_finished",
+                            {
+                                "tool_name": "image_evidence_intake",
+                                "status": "ok",
+                                "summary": "图片证据摘要已准备好，会一起送进这轮判断。",
+                            },
+                        )
+                    prompt = self._build_context_prompt(
+                        payload,
+                        classification,
+                        preflight_tradeoff,
+                        memory_snapshot,
+                        images,
+                        visual_report,
                     )
                     yield RuntimeStreamEvent(
                         "agent_started",
@@ -485,6 +546,9 @@ class DecisionAgentRuntime:
                             metadata=skill_snapshot.to_metadata(),
                             tags=skill_snapshot.to_tags(),
                         )
+                    agent_result["visual_report_present"] = visual_report is not None
+                    if visual_report is not None:
+                        agent_result["visual_uncertainty_count"] = len(visual_report.uncertainties)
                     agent_result["duration_ms"] = int((time.monotonic() - start_time) * 1000)
                     end_traced_span(
                         agent_span,
@@ -555,12 +619,68 @@ class DecisionAgentRuntime:
             return "".join(parts)
         return ""
 
+    def _build_visual_report(
+        self,
+        run_id: str,
+        payload: RunCreateRequest,
+        classification: ClassificationResult,
+        images: list[RunImage],
+    ) -> VisualReport | None:
+        if not images:
+            return None
+
+        with traced_span(
+            self.settings,
+            name="visual_evidence",
+            inputs={
+                "question": payload.question,
+                "category": classification.category,
+                "image_files": [image.file_name for image in images],
+                "image_count": len(images),
+            },
+            tags=make_trace_tags(
+                self.settings,
+                "component:vision",
+                f"category:{classification.category}",
+            ),
+            metadata={
+                "run_id": run_id,
+                "thread_id": run_id,
+                "category": classification.category,
+                "image_count": len(images),
+                "image_names": [image.file_name for image in images],
+            },
+        ) as visual_span:
+            report = self.visual_analyzer.analyze(payload, classification, images)
+            end_traced_span(
+                visual_span,
+                outputs=report.model_dump(mode="json"),
+                metadata={
+                    "image_count": len(images),
+                    "uncertainty_count": len(report.uncertainties),
+                },
+            )
+        return report
+
+    def _serialize_image_inputs(self, images: list[RunImage]) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": image.id,
+                "file_name": image.file_name,
+                "mime_type": image.mime_type,
+                "size_bytes": image.size_bytes,
+            }
+            for image in images
+        ]
+
     def _build_context_prompt(
         self,
         payload: RunCreateRequest,
         classification: ClassificationResult,
         preflight_tradeoff: dict[str, Any],
         memory_snapshot: dict[str, str],
+        images: list[RunImage],
+        visual_report: VisualReport | None,
     ) -> str:
         context = {
             "question": payload.question,
@@ -568,9 +688,11 @@ class DecisionAgentRuntime:
             "deadline": payload.deadline,
             "location": payload.location,
             "links": payload.links,
+            "image_inputs": self._serialize_image_inputs(images),
             "notes": payload.notes,
             "classification": classification.model_dump(mode="json"),
             "memory_snapshot": memory_snapshot,
+            "visual_report": visual_report.model_dump(mode="json") if visual_report is not None else None,
             "context_hints": self._build_context_hints(payload, classification),
             "preflight_tradeoff": preflight_tradeoff,
         }
@@ -581,7 +703,7 @@ class DecisionAgentRuntime:
             f"{json.dumps(context, ensure_ascii=False, indent=2)}"
         )
 
-    def _build_context_hints(self, payload: RunCreateRequest, classification: ClassificationResult) -> dict[str, Any]:
+    def _build_context_hints_legacy(self, payload: RunCreateRequest, classification: ClassificationResult) -> dict[str, Any]:
         hints = {
             "question_length": len(payload.question.strip()),
             "has_links": bool(payload.links),
@@ -593,6 +715,29 @@ class DecisionAgentRuntime:
         }
         if payload.links:
             hints["suggested_tool_policy"].append("优先读取用户给的链接，而不是先做公开网页搜索。")
+        if classification.category == "social":
+            hints["suggested_tool_policy"].append("社交类问题默认不联网，只基于用户提供的背景判断。")
+        if classification.category == "travel" and payload.location:
+            hints["suggested_tool_policy"].append("如果需要补事实，优先地理编码和天气，不要先盲搜。")
+        if not payload.links and classification.category in {"spending", "work_learning"}:
+            hints["suggested_tool_policy"].append("如果现有上下文已经够用，就直接判断，不要为了联网而联网。")
+        return hints
+
+    def _build_context_hints(self, payload: RunCreateRequest, classification: ClassificationResult) -> dict[str, Any]:
+        hints = {
+            "question_length": len(payload.question.strip()),
+            "has_links": bool(payload.links),
+            "has_images": bool(payload.image_ids),
+            "has_budget": bool(payload.budget),
+            "has_deadline": bool(payload.deadline),
+            "has_location": bool(payload.location),
+            "missing_fields": classification.missing_fields,
+            "suggested_tool_policy": [],
+        }
+        if payload.links:
+            hints["suggested_tool_policy"].append("优先读取用户给的链接，而不是先做公开网页搜索。")
+        if payload.image_ids:
+            hints["suggested_tool_policy"].append("如果已经有图片摘要，先消化可见事实和不确定点，不要脑补图片里没出现的信息。")
         if classification.category == "social":
             hints["suggested_tool_policy"].append("社交类问题默认不联网，只基于用户提供的背景判断。")
         if classification.category == "travel" and payload.location:

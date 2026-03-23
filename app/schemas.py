@@ -40,6 +40,7 @@ class RunCreateRequest(BaseModel):
     deadline: str | None = None
     location: str | None = None
     links: list[str] = Field(default_factory=list)
+    image_ids: list[str] = Field(default_factory=list)
     notes: str | None = None
     user_id: str | None = None
 
@@ -48,6 +49,19 @@ class RunCreateRequest(BaseModel):
     def normalize_links(cls, value: list[str]) -> list[str]:
         cleaned = [item.strip() for item in value if item and item.strip()]
         return cleaned[:5]
+
+    @field_validator("image_ids")
+    @classmethod
+    def normalize_image_ids(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            candidate = item.strip()
+            if not candidate or candidate in seen:
+                continue
+            cleaned.append(candidate)
+            seen.add(candidate)
+        return cleaned[:3]
 
     @model_validator(mode="after")
     def enrich_links_from_freeform_text(self) -> "RunCreateRequest":
@@ -97,6 +111,13 @@ class SkepticSummary(BaseModel):
     boundary_flags: list[str] = Field(default_factory=list)
 
 
+class VisualReport(BaseModel):
+    summary: str
+    extracted_facts: list[str] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    image_count: int = Field(default=0, ge=0)
+
+
 class RunVerdict(BaseModel):
     category: Category
     verdict: str
@@ -129,6 +150,16 @@ class RunSource(BaseModel):
     created_at: datetime
 
 
+class RunImage(BaseModel):
+    id: str
+    run_id: str | None = None
+    file_name: str
+    mime_type: str
+    local_path: str = Field(exclude=True)
+    size_bytes: int = Field(ge=0)
+    created_at: datetime
+
+
 class RunRecord(BaseModel):
     id: str
     user_id: str
@@ -142,6 +173,7 @@ class RunRecord(BaseModel):
     classification: ClassificationResult | None = None
     research_summary: ResearchSummary | None = None
     skeptic_summary: SkepticSummary | None = None
+    visual_report: VisualReport | None = None
     verdict: RunVerdict | None = None
     error_message: str | None = None
     created_at: datetime
@@ -152,6 +184,7 @@ class RunEnvelope(BaseModel):
     run: RunRecord
     events: list[RunEvent] = Field(default_factory=list)
     sources: list[RunSource] = Field(default_factory=list)
+    images: list[RunImage] = Field(default_factory=list)
 
 
 class PreferenceSnapshot(BaseModel):

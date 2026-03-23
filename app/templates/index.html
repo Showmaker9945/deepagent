@@ -13,7 +13,7 @@
         <h1>{{ app_name }}</h1>
         <p class="lede">
           把问题一股脑写进来就行。预算、地点、时间、链接、纠结点，能写多自然就写多自然。
-          这次由主 Deep Agent 直接接管，不再演三个人轮流抢麦。
+          现在也可以顺手扔几张截图，让系统把图里的证据一起吃进去。
         </p>
       </section>
 
@@ -22,15 +22,28 @@
           <label>
             <span>把情况直接说完整</span>
             <p class="form-hint">
-              例子：这周六我想去杭州看展，来回预算 400 左右，活动页
-              https://example.com/event，但我最近有点累，周一还得上班，这趟到底值不值？
+              例子：这周六我想去杭州看展，来回预算 400 左右，活动页 https://example.com/event，
+              但我最近有点累，周一还得上班，这趟到底值不值？
             </p>
             <textarea
               name="question"
               rows="11"
-              placeholder="这事我要不要做？把你知道的背景都扔进来。"
+              placeholder="这件事我要不要做？把你知道的背景都扔进来。"
             ></textarea>
           </label>
+
+          <label>
+            <span>有图就一起扔进来</span>
+            <p class="form-hint">最多上传 3 张图片，支持 PNG、JPG、WEBP。</p>
+            <input id="image-input" name="images" type="file" accept="image/png,image/jpeg,image/webp" multiple />
+          </label>
+
+          <div id="image-selection" class="upload-selection hidden">
+            <strong>已选图片</strong>
+            <ul id="image-selection-list"></ul>
+          </div>
+
+          <p id="form-state" class="muted small"></p>
 
           <button class="primary" type="submit">开始判断</button>
         </form>

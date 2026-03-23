@@ -16,12 +16,14 @@ from app.schemas import (
     RunCreateRequest,
     RunEnvelope,
     RunEvent,
+    RunImage,
     RunRecord,
     RunSource,
     RunSourceType,
     RunStatus,
     RunVerdict,
     SkepticSummary,
+    VisualReport,
 )
 from app.text_utils import extract_urls
 
@@ -63,6 +65,7 @@ class Storage:
                     classification_json TEXT,
                     research_json TEXT,
                     skeptic_json TEXT,
+                    visual_report_json TEXT,
                     verdict_json TEXT,
                     error_message TEXT,
                     created_at TEXT NOT NULL,
@@ -86,6 +89,17 @@ class Storage:
                     url TEXT,
                     snippet TEXT,
                     source_meta_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS run_images (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT,
+                    file_name TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    local_path TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
                 );
@@ -125,11 +139,15 @@ class Storage:
                 CREATE INDEX IF NOT EXISTS idx_run_sources_run_id_id
                 ON run_sources(run_id, id);
 
+                CREATE INDEX IF NOT EXISTS idx_run_images_run_id_created_at
+                ON run_images(run_id, created_at DESC);
+
                 CREATE INDEX IF NOT EXISTS idx_feedback_run_id_created_at
                 ON feedback(run_id, created_at DESC);
                 """
             )
             self._ensure_column(connection, "runs", "cancel_requested", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "runs", "visual_report_json", "TEXT")
 
     def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
         rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
@@ -158,6 +176,8 @@ class Storage:
                     now,
                 ),
             )
+            if payload.image_ids:
+                self._claim_images(connection, run_id, payload.image_ids)
         return run_id
 
     def get_run(self, run_id: str) -> RunRecord | None:
@@ -189,11 +209,56 @@ class Storage:
             ).fetchall()
         return [self._row_to_source(row) for row in rows]
 
+    def list_images(self, run_id: str) -> list[RunImage]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM run_images
+                WHERE run_id = ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (run_id,),
+            ).fetchall()
+        return [self._row_to_image(row) for row in rows]
+
     def get_run_envelope(self, run_id: str) -> RunEnvelope | None:
         run = self.get_run(run_id)
         if not run:
             return None
-        return RunEnvelope(run=run, events=self.list_events(run_id), sources=self.list_sources(run_id))
+        return RunEnvelope(
+            run=run,
+            events=self.list_events(run_id),
+            sources=self.list_sources(run_id),
+            images=self.list_images(run_id),
+        )
+
+    def create_image_upload(
+        self,
+        *,
+        image_id: str,
+        file_name: str,
+        mime_type: str,
+        local_path: str,
+        size_bytes: int,
+    ) -> RunImage:
+        created_at = utcnow()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO run_images (id, run_id, file_name, mime_type, local_path, size_bytes, created_at)
+                VALUES (?, NULL, ?, ?, ?, ?, ?)
+                """,
+                (image_id, file_name, mime_type, local_path, size_bytes, created_at),
+            )
+        image = self.get_image(image_id)
+        if image is None:
+            raise RuntimeError("Failed to persist uploaded image metadata.")
+        return image
+
+    def get_image(self, image_id: str) -> RunImage | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM run_images WHERE id = ?", (image_id,)).fetchone()
+        return self._row_to_image(row) if row else None
 
     def append_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
         with self.connect() as connection:
@@ -297,6 +362,7 @@ class Storage:
         classification: ClassificationResult | None = None,
         research_summary: ResearchSummary | None = None,
         skeptic_summary: SkepticSummary | None = None,
+        visual_report: VisualReport | None = None,
         verdict: RunVerdict | None = None,
         input_payload: RunCreateRequest | None = None,
     ) -> None:
@@ -320,6 +386,8 @@ class Storage:
             updates["research_json"] = research_summary.model_dump_json()
         if skeptic_summary is not None:
             updates["skeptic_json"] = skeptic_summary.model_dump_json()
+        if visual_report is not None:
+            updates["visual_report_json"] = visual_report.model_dump_json()
         if verdict is not None:
             updates["verdict_json"] = verdict.model_dump_json()
         if input_payload is not None:
@@ -343,6 +411,7 @@ class Storage:
             deadline=payload.deadline,
             location=payload.location,
             links=[*payload.links, *discovered_links],
+            image_ids=payload.image_ids,
             notes="\n".join(part for part in [payload.notes or "", f"Clarification: {answer}"] if part).strip(),
             user_id=payload.user_id,
         )
@@ -472,10 +541,22 @@ class Storage:
             created_at=datetime.fromisoformat(row["created_at"]),
         )
 
+    def _row_to_image(self, row: sqlite3.Row) -> RunImage:
+        return RunImage(
+            id=row["id"],
+            run_id=row["run_id"],
+            file_name=row["file_name"],
+            mime_type=row["mime_type"],
+            local_path=row["local_path"],
+            size_bytes=row["size_bytes"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
     def _row_to_run(self, row: sqlite3.Row) -> RunRecord:
         classification_json = row["classification_json"]
         research_json = row["research_json"]
         skeptic_json = row["skeptic_json"]
+        visual_report_json = row["visual_report_json"] if "visual_report_json" in row.keys() else None
         verdict_json = row["verdict_json"]
         return RunRecord(
             id=row["id"],
@@ -490,8 +571,37 @@ class Storage:
             classification=ClassificationResult.model_validate_json(classification_json) if classification_json else None,
             research_summary=ResearchSummary.model_validate_json(research_json) if research_json else None,
             skeptic_summary=SkepticSummary.model_validate_json(skeptic_json) if skeptic_json else None,
+            visual_report=VisualReport.model_validate_json(visual_report_json) if visual_report_json else None,
             verdict=RunVerdict.model_validate_json(verdict_json) if verdict_json else None,
             error_message=row["error_message"],
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def _claim_images(self, connection: sqlite3.Connection, run_id: str, image_ids: list[str]) -> None:
+        placeholders = ", ".join("?" for _ in image_ids)
+        rows = connection.execute(
+            f"""
+            SELECT id, run_id
+            FROM run_images
+            WHERE id IN ({placeholders})
+            """,
+            image_ids,
+        ).fetchall()
+        row_map = {row["id"]: row for row in rows}
+        missing = [image_id for image_id in image_ids if image_id not in row_map]
+        if missing:
+            raise ValueError(f"Unknown image upload ids: {', '.join(missing)}")
+
+        occupied = [image_id for image_id, row in row_map.items() if row["run_id"] not in {None, run_id}]
+        if occupied:
+            raise ValueError(f"Image uploads already attached: {', '.join(occupied)}")
+
+        connection.execute(
+            f"""
+            UPDATE run_images
+            SET run_id = ?
+            WHERE id IN ({placeholders})
+            """,
+            [run_id, *image_ids],
         )

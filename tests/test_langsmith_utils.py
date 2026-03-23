@@ -53,6 +53,7 @@ def test_build_root_trace_metadata_captures_request_shape(monkeypatch):
         budget="2500",
         location="上海",
         links=["https://example.com/item?campaign=test"],
+        image_ids=["img-1"],
     )
 
     metadata = build_root_trace_metadata(
@@ -68,8 +69,10 @@ def test_build_root_trace_metadata_captures_request_shape(monkeypatch):
     assert metadata["app_env"] == "test"
     assert metadata["user_id"] == hash_identifier("local-user")
     assert metadata["links_count"] == 1
+    assert metadata["image_count"] == 1
     assert metadata["has_budget"] is True
     assert metadata["has_location"] is True
+    assert metadata["has_images"] is True
     assert metadata["payload_preview"]["links"] == ["https://example.com/item"]
 
 

@@ -112,6 +112,7 @@ def build_root_trace_metadata(
 ) -> dict[str, Any]:
     sanitized_payload = sanitize_trace_value(payload)
     links = payload.links if hasattr(payload, "links") else []
+    image_ids = payload.image_ids if hasattr(payload, "image_ids") else []
     return {
         "thread_id": run_id,
         "run_id": run_id,
@@ -121,6 +122,8 @@ def build_root_trace_metadata(
         "question_length": len(getattr(payload, "question", "").strip()),
         "has_links": bool(links),
         "links_count": len(links),
+        "has_images": bool(image_ids),
+        "image_count": len(image_ids),
         "has_budget": bool(getattr(payload, "budget", None)),
         "has_deadline": bool(getattr(payload, "deadline", None)),
         "has_location": bool(getattr(payload, "location", None)),

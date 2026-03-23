@@ -58,6 +58,8 @@ const CATEGORY_LABELS = {
   unsupported: "高风险问题",
 };
 
+const MAX_IMAGE_COUNT = 3;
+
 const state = {
   runId: null,
   stream: null,
@@ -68,10 +70,11 @@ const state = {
 
 const $ = (selector) => document.querySelector(selector);
 
-function collectPayload(form) {
+function collectPayload(form, imageIds = []) {
   const formData = new FormData(form);
   return {
     question: (formData.get("question") || "").toString().trim(),
+    image_ids: imageIds,
   };
 }
 
@@ -98,6 +101,12 @@ function setCancelVisibility(visible) {
   $("#cancel-button").classList.toggle("hidden", !visible);
 }
 
+function setFormState(message = "", isError = false) {
+  const target = $("#form-state");
+  target.textContent = message;
+  target.classList.toggle("error-text", Boolean(isError && message));
+}
+
 function clearTimelinePlaceholder() {
   const timeline = $("#timeline");
   const placeholder = timeline.querySelector(".muted");
@@ -114,7 +123,7 @@ function formatEvent(eventType, payload) {
     case "clarification_needed":
       return `还差一条关键信息：${payload.question}`;
     case "agent_started":
-      return payload.message || "主 Deep Agent 已接手。";
+      return payload.message || "Deep Agent 已经接手。";
     case "tool_started":
       return payload.summary || `开始调用 ${payload.tool_name}`;
     case "tool_finished":
@@ -229,6 +238,7 @@ function createSourceCard(source) {
   if (meta.query) metaParts.push(`查询：${meta.query}`);
   if (meta.start_date && meta.end_date) metaParts.push(`日期：${meta.start_date} ~ ${meta.end_date}`);
   if (meta.latitude && meta.longitude) metaParts.push(`坐标：${meta.latitude}, ${meta.longitude}`);
+  if (meta.image_count) metaParts.push(`图片：${meta.image_count} 张`);
   if (metaParts.length) {
     const metaLine = document.createElement("p");
     metaLine.className = "muted tiny";
@@ -333,6 +343,44 @@ function renderVerdict(run) {
   renderList("#top-risks", verdict.top_risks);
 }
 
+function renderSelectedImages(files) {
+  const selected = Array.from(files || []).slice(0, MAX_IMAGE_COUNT);
+  const box = $("#image-selection");
+  const list = $("#image-selection-list");
+  list.innerHTML = "";
+  if (!selected.length) {
+    box.classList.add("hidden");
+    return;
+  }
+  box.classList.remove("hidden");
+  selected.forEach((file) => {
+    const li = document.createElement("li");
+    li.textContent = `${file.name} (${Math.max(1, Math.round(file.size / 1024))} KB)`;
+    list.appendChild(li);
+  });
+}
+
+async function uploadImages(files) {
+  const chosen = Array.from(files || []).slice(0, MAX_IMAGE_COUNT);
+  const uploadedIds = [];
+
+  for (const file of chosen) {
+    const body = new FormData();
+    body.append("file", file);
+    const response = await fetch("/api/uploads", {
+      method: "POST",
+      body,
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.detail || `图片上传失败：${file.name}`);
+    }
+    uploadedIds.push(data.id);
+  }
+
+  return uploadedIds;
+}
+
 async function loadRun(runId) {
   const response = await fetch(`/api/runs/${runId}`);
   const data = await response.json();
@@ -381,21 +429,51 @@ function openStream(runId) {
   };
 }
 
+$("#image-input").addEventListener("change", (event) => {
+  renderSelectedImages(event.currentTarget.files);
+});
+
 $("#run-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  setFormState("");
   resetUi();
 
-  const payload = collectPayload(event.currentTarget);
-  const response = await fetch("/api/runs", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await response.json();
-  state.runId = data.run_id;
-  setCancelVisibility(true);
-  openStream(state.runId);
-  await loadRun(state.runId);
+  const form = event.currentTarget;
+  const imageFiles = $("#image-input").files;
+
+  try {
+    if (!collectPayload(form).question) {
+      throw new Error("先把问题写下来，我才能开始判断。");
+    }
+
+    let imageIds = [];
+    if (imageFiles && imageFiles.length) {
+      setFormState("正在上传图片...");
+      imageIds = await uploadImages(imageFiles);
+    }
+
+    setFormState("正在发起这轮判断...");
+    const payload = collectPayload(form, imageIds);
+    const response = await fetch("/api/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.detail || "创建 run 失败。");
+    }
+
+    state.runId = data.run_id;
+    setCancelVisibility(true);
+    setFormState("");
+    openStream(state.runId);
+    await loadRun(state.runId);
+  } catch (error) {
+    closeStream();
+    setCancelVisibility(false);
+    setFormState(error.message || "提交失败，请稍后再试。", true);
+  }
 });
 
 $("#clarification-form").addEventListener("submit", async (event) => {

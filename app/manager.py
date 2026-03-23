@@ -492,6 +492,8 @@ class RunManager:
             "category": run.category,
             "clarification_count": run.clarification_count,
             "fallback_used": fallback_used,
+            "image_count": len(run.input_payload.get("image_ids", [])),
+            "visual_report": run.visual_report.model_dump(mode="json") if run.visual_report else None,
             "verdict": run.verdict.model_dump(mode="json") if run.verdict else None,
             "error_message": run.error_message,
         }

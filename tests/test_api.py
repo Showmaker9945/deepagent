@@ -290,3 +290,34 @@ def test_readyz_reports_storage_state():
     assert "has_dashscope_api_key" in body
     assert "has_tavily_api_key" in body
     assert body["langsmith_enabled"] is is_langsmith_enabled(settings)
+
+
+def test_upload_endpoint_and_run_envelope_include_images():
+    with TestClient(app) as client:
+        app.state.manager.runtime = FakeRuntime()
+
+        upload_response = client.post(
+            "/api/uploads",
+            files={"file": ("poster.png", b"fake-image", "image/png")},
+        )
+        assert upload_response.status_code == 200
+        image_id = upload_response.json()["id"]
+
+        create_response = client.post(
+            "/api/runs",
+            json={
+                "question": "这张海报上的活动要不要去？",
+                "image_ids": [image_id],
+            },
+        )
+        assert create_response.status_code == 200
+
+        run_id = create_response.json()["run_id"]
+        run_response = client.get(f"/api/runs/{run_id}")
+        assert run_response.status_code == 200
+        body = run_response.json()
+
+        assert body["run"]["input_payload"]["image_ids"] == [image_id]
+        assert len(body["images"]) == 1
+        assert body["images"][0]["id"] == image_id
+        assert body["images"][0]["file_name"] == "poster.png"
