@@ -1,9 +1,7 @@
 ---
 name: memory-regret-check
-description: Use stored preference and regret memory to detect repeated decision traps, apply memory only when it is relevant, and convert it into one concrete adjustment for the current verdict.
+description: Use stored preference and regret memory to detect repeated decision traps without overfitting. Use when memory_snapshot is present and the current case may rhyme with a known pattern, especially before finalizing a structured verdict.
 compatibility: Designed for the do-or-not project with classification, preflight_tradeoff, memory_snapshot, and structured RunVerdict output.
-allowed_tools:
-  - score_tradeoff_tool
 ---
 
 # Memory Regret Check
@@ -42,6 +40,7 @@ Review these inputs before using memory:
 - `preflight_tradeoff`
 - `memory_snapshot.profile_markdown`
 - `memory_snapshot.regret_markdown`
+- `visual_report` when present
 - The user's current constraints such as budget, deadline, links, and notes
 
 ## Workflow
@@ -67,6 +66,23 @@ Review these inputs before using memory:
    Memory can lower or raise confidence, but it should not override stronger
    current facts.
 
+6. Prefer one clear lesson over many weak echoes.
+   If several patterns partly match, choose the single repeat-risk that would
+   most improve the user's next step.
+
+## Priority Order
+
+When memory competes with other evidence, prefer this order:
+
+1. Current verified facts
+2. Image or link evidence grounded in the current case
+3. Current user constraints
+4. `preflight_tradeoff`
+5. Relevant memory
+
+If memory still matters after that comparison, use it to refine the verdict,
+not to replace the present tense evidence.
+
 ## Guardrails
 
 - Never force memory into the answer if relevance is weak.
@@ -74,6 +90,8 @@ Review these inputs before using memory:
 - Do not overfit to a single past feedback item.
 - Prioritize current constraints over old habits when they conflict.
 - Do not dump the memory snapshot back to the user verbatim.
+- Do not revive stale memory just to sound personalized.
+- Do not re-run local scoring tools only because memory exists.
 
 ## What Good Use Looks Like
 
@@ -83,6 +101,8 @@ Good use of memory sounds like this:
 - "This is different from your past regret pattern because the budget and usage
   frequency are clearer this time."
 - "The memory mainly changes confidence and next step, not the core verdict."
+- "This resembles your old pattern of starting too big, so the safest next step
+  is to shrink scope before committing."
 
 ## What Bad Use Looks Like
 
@@ -90,6 +110,8 @@ Good use of memory sounds like this:
 - "Past memory says no, so the answer is no."
 - Repeating every stored preference regardless of relevance.
 - Letting memory drown out stronger new evidence from the current case.
+- Treating memory as a substitute for reading the current screenshots, links,
+  or constraints.
 
 ## Escalation Rule
 
@@ -102,6 +124,9 @@ If memory and current evidence point in different directions, prefer this order:
 
 If the conflict remains real, keep the verdict but lower confidence and make the
 next step more cautious.
+
+If the conflict is weak or fuzzy, drop the memory instead of forcing a dramatic
+warning.
 
 ## Success Criteria
 
