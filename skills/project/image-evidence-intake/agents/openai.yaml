@@ -1,0 +1,4 @@
+interface:
+  display_name: "Image Evidence Intake"
+  short_description: "Ground verdicts in uploaded screenshots and photo evidence"
+  default_prompt: "Use $image-evidence-intake to extract decision-critical facts from uploaded screenshots before finalizing the verdict."

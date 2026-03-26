@@ -189,10 +189,23 @@ def test_runtime_reuses_single_sqlite_checkpointer(tmp_path):
 def test_collect_registered_skill_catalog_lists_bundled_skills():
     catalog = collect_registered_skill_catalog()
     names = {item["name"] for item in catalog}
+    catalog_by_name = {item["name"]: item for item in catalog}
 
     assert "image-evidence-intake" in names
     assert "link-first-research" in names
     assert "memory-regret-check" in names
+
+    image_skill = catalog_by_name["image-evidence-intake"]
+    assert image_skill["has_openai_yaml"] is True
+    assert image_skill["display_name"] == "Image Evidence Intake"
+    assert image_skill["metadata_path"] == "/skills/project/image-evidence-intake/agents/openai.yaml"
+    assert image_skill["default_prompt"].startswith("Use $image-evidence-intake")
+
+    memory_skill = catalog_by_name["memory-regret-check"]
+    assert memory_skill["has_openai_yaml"] is True
+    assert memory_skill["display_name"] == "Memory Regret Check"
+    assert memory_skill["metadata_path"] == "/skills/project/memory-regret-check/agents/openai.yaml"
+    assert memory_skill["default_prompt"].startswith("Use $memory-regret-check")
 
 
 def test_select_skill_candidates_uses_links_and_memory():
@@ -256,5 +269,50 @@ def test_skill_tracing_backend_records_scan_load_and_read(tmp_path):
         assert snapshot.metadata_load_names == ["memory-regret-check"]
         assert snapshot.read_names == ["memory-regret-check"]
         assert "skill_read:memory-regret-check" in snapshot.to_tags()
+    finally:
+        reset_skill_trace(token)
+
+
+def test_skill_trace_snapshot_metadata_includes_openai_ui_summary():
+    token = begin_skill_trace(
+        available_skills=[
+            {
+                "name": "memory-regret-check",
+                "path": "/skills/project/memory-regret-check/SKILL.md",
+                "source": "project",
+                "has_openai_yaml": True,
+                "metadata_path": "/skills/project/memory-regret-check/agents/openai.yaml",
+                "display_name": "Memory Regret Check",
+                "short_description": "Apply relevant preference and regret memory without overfitting",
+                "default_prompt": (
+                    "Use $memory-regret-check to test whether this case repeats a known regret "
+                    "pattern before finalizing the verdict."
+                ),
+            }
+        ],
+        candidate_skill_names=["memory-regret-check"],
+    )
+    try:
+        snapshot = get_skill_trace_snapshot()
+
+        assert snapshot is not None
+
+        metadata = snapshot.to_metadata()
+        assert metadata["available_skill_ui_metadata_count"] == 1
+        assert metadata["candidate_skill_metadata"] == [
+            {
+                "name": "memory-regret-check",
+                "source": "project",
+                "path": "/skills/project/memory-regret-check/SKILL.md",
+                "display_name": "Memory Regret Check",
+                "has_openai_yaml": True,
+                "short_description": "Apply relevant preference and regret memory without overfitting",
+                "default_prompt": (
+                    "Use $memory-regret-check to test whether this case repeats a known regret "
+                    "pattern before finalizing the verdict."
+                ),
+                "metadata_path": "/skills/project/memory-regret-check/agents/openai.yaml",
+            }
+        ]
     finally:
         reset_skill_trace(token)

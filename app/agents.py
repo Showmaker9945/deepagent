@@ -43,6 +43,14 @@ SKILL_ROUTE_ROOTS = {
 }
 EMPTY_PROFILE_MEMORY = "No persistent preferences yet."
 EMPTY_REGRET_MEMORY = "No regret patterns recorded yet."
+SKILL_INTERFACE_KEYS = {
+    "display_name",
+    "short_description",
+    "icon_small",
+    "icon_large",
+    "brand_color",
+    "default_prompt",
+}
 CURRENT_SKILL_TRACE: contextvars.ContextVar["SkillTraceSnapshot | None"] = contextvars.ContextVar(
     "do_or_not_skill_trace",
     default=None,
@@ -51,7 +59,7 @@ CURRENT_SKILL_TRACE: contextvars.ContextVar["SkillTraceSnapshot | None"] = conte
 
 @dataclass(slots=True)
 class SkillTraceSnapshot:
-    available_skills: list[dict[str, str]]
+    available_skills: list[dict[str, Any]]
     candidate_skill_names: list[str]
     metadata_scan_paths: list[str] = field(default_factory=list)
     metadata_load_paths: list[str] = field(default_factory=list)
@@ -71,11 +79,21 @@ class SkillTraceSnapshot:
         _append_unique(self.read_names, PurePosixPath(path).parent.name)
 
     def to_metadata(self) -> dict[str, Any]:
+        available_skill_metadata = _summarize_skill_catalog(self.available_skills)
+        candidate_skill_metadata = _summarize_skill_catalog(
+            self.available_skills,
+            self.candidate_skill_names,
+        )
         return {
             "skill_sources": list(DEEPAGENT_SKILL_SOURCES),
             "available_skill_names": [item["name"] for item in self.available_skills],
             "available_skills": self.available_skills,
+            "available_skill_metadata": available_skill_metadata,
+            "available_skill_ui_metadata_count": sum(
+                1 for item in available_skill_metadata if item["has_openai_yaml"]
+            ),
             "candidate_skill_names": list(self.candidate_skill_names),
+            "candidate_skill_metadata": candidate_skill_metadata,
             "metadata_scan_paths": list(self.metadata_scan_paths),
             "metadata_load_paths": list(self.metadata_load_paths),
             "metadata_load_names": list(self.metadata_load_names),
@@ -96,8 +114,8 @@ class SkillTraceSnapshot:
         return tags
 
 
-def collect_registered_skill_catalog() -> list[dict[str, str]]:
-    catalog: list[dict[str, str]] = []
+def collect_registered_skill_catalog() -> list[dict[str, Any]]:
+    catalog: list[dict[str, Any]] = []
     for source_path, route_root in SKILL_ROUTE_ROOTS.items():
         if not route_root.exists():
             continue
@@ -106,13 +124,22 @@ def collect_registered_skill_catalog() -> list[dict[str, str]]:
             skill_file = skill_dir / "SKILL.md"
             if not skill_dir.is_dir() or not skill_file.exists():
                 continue
-            catalog.append(
-                {
-                    "name": skill_dir.name,
-                    "path": f"{source_path}{skill_dir.name}/SKILL.md",
-                    "source": source_name,
-                }
-            )
+            interface = _read_skill_interface_metadata(skill_dir)
+            item: dict[str, Any] = {
+                "name": skill_dir.name,
+                "path": f"{source_path}{skill_dir.name}/SKILL.md",
+                "source": source_name,
+                "has_openai_yaml": bool(interface),
+            }
+            if interface:
+                item["metadata_path"] = f"{source_path}{skill_dir.name}/agents/openai.yaml"
+                item["interface"] = interface
+                item["display_name"] = interface.get("display_name", skill_dir.name)
+                if interface.get("short_description"):
+                    item["short_description"] = interface["short_description"]
+                if interface.get("default_prompt"):
+                    item["default_prompt"] = interface["default_prompt"]
+            catalog.append(item)
     return catalog
 
 
@@ -136,7 +163,7 @@ def select_skill_candidates(
 
 
 def begin_skill_trace(
-    available_skills: list[dict[str, str]],
+    available_skills: list[dict[str, Any]],
     candidate_skill_names: list[str],
 ) -> contextvars.Token:
     return CURRENT_SKILL_TRACE.set(
@@ -158,6 +185,88 @@ def reset_skill_trace(token: contextvars.Token) -> None:
 def _append_unique(items: list[str], value: str) -> None:
     if value and value not in items:
         items.append(value)
+
+
+def _read_skill_interface_metadata(skill_dir: Path) -> dict[str, str]:
+    metadata_path = skill_dir / "agents" / "openai.yaml"
+    if not metadata_path.exists():
+        return {}
+
+    interface: dict[str, str] = {}
+    in_interface = False
+    interface_indent = 0
+
+    for raw_line in metadata_path.read_text(encoding="utf-8").splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        line = raw_line.rstrip()
+
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        stripped = line.strip()
+
+        if not in_interface:
+            if stripped == "interface:":
+                in_interface = True
+                interface_indent = indent
+            continue
+
+        if indent <= interface_indent:
+            break
+
+        key, separator, raw_value = stripped.partition(":")
+        if not separator:
+            continue
+
+        normalized_key = key.strip()
+        if normalized_key not in SKILL_INTERFACE_KEYS:
+            continue
+
+        value = _parse_yaml_string(raw_value.strip())
+        if value:
+            interface[normalized_key] = value
+
+    return interface
+
+
+def _parse_yaml_string(value: str) -> str:
+    if not value:
+        return ""
+    if value.startswith('"') and value.endswith('"'):
+        try:
+            return str(json.loads(value))
+        except json.JSONDecodeError:
+            return value[1:-1]
+    if value.startswith("'") and value.endswith("'"):
+        return value[1:-1]
+    return value
+
+
+def _summarize_skill_catalog(
+    skills: list[dict[str, Any]],
+    selected_names: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    if selected_names is None:
+        return [_build_skill_metadata_summary(item) for item in skills]
+
+    by_name = {str(item["name"]): item for item in skills}
+    return [_build_skill_metadata_summary(by_name[name]) for name in selected_names if name in by_name]
+
+
+def _build_skill_metadata_summary(item: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "name": item["name"],
+        "source": item["source"],
+        "path": item["path"],
+        "display_name": item.get("display_name", item["name"]),
+        "has_openai_yaml": bool(item.get("has_openai_yaml")),
+    }
+    if item.get("short_description"):
+        summary["short_description"] = item["short_description"]
+    if item.get("default_prompt"):
+        summary["default_prompt"] = item["default_prompt"]
+    if item.get("metadata_path"):
+        summary["metadata_path"] = item["metadata_path"]
+    return summary
 
 
 class SkillTracingFilesystemBackend(FilesystemBackend):

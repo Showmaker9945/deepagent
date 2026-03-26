@@ -1,0 +1,4 @@
+interface:
+  display_name: "Memory Regret Check"
+  short_description: "Apply relevant preference and regret memory without overfitting"
+  default_prompt: "Use $memory-regret-check to test whether this case repeats a known regret pattern before finalizing the verdict."
