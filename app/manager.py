@@ -210,17 +210,23 @@ class RunManager:
                                 reason="Deep Agent 没有稳定产出结构化结论，已切到本地保守兜底。",
                             )
                 except AgentConfigurationError as exc:
-                    trace_path = "failed"
-                    logger.exception(
-                        "Run failed because model configuration is missing",
+                    fallback_used = True
+                    trace_path = "fallback"
+                    logger.warning(
+                        "Run used fallback because model configuration is unavailable",
                         extra={
                             "run_id": run_id,
                             "category": classification.category,
-                            "status": "failed",
+                            "status": "fallback",
                         },
                     )
-                    self.storage.update_status(run_id, "failed", cancel_requested=False, error_message=str(exc))
-                    self.storage.append_event(run_id, "error", {"message": str(exc)})
+                    self._complete_with_fallback(
+                        run_id,
+                        payload,
+                        classification,
+                        reason=f"模型配置不可用，已切到本地保守兜底：{exc}",
+                        emit_error_event=True,
+                    )
                 except Exception as exc:  # pragma: no cover
                     fallback_used = True
                     trace_path = "fallback"

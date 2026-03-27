@@ -6,6 +6,25 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def get_dashscope_api_key_status(value: str | None) -> str:
+    if not value:
+        return "missing"
+
+    normalized = value.strip().strip('"').strip("'").lower()
+    if normalized == "your-dashscope-api-key":
+        return "placeholder"
+    return "configured"
+
+
+def describe_dashscope_config_issue(value: str | None) -> str | None:
+    status = get_dashscope_api_key_status(value)
+    if status == "missing":
+        return "未配置 `DASHSCOPE_API_KEY`，当前无法调用 DeepAgent 或视觉模型。"
+    if status == "placeholder":
+        return "`DASHSCOPE_API_KEY` 仍是占位值 `your-dashscope-api-key`，请替换为真实 DashScope API Key。"
+    return None
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -41,6 +60,18 @@ class Settings(BaseSettings):
     @property
     def data_dir(self) -> Path:
         return self.sqlite_db_path.parent
+
+    @property
+    def dashscope_api_key_status(self) -> str:
+        return get_dashscope_api_key_status(self.dashscope_api_key)
+
+    @property
+    def has_usable_dashscope_api_key(self) -> bool:
+        return self.dashscope_api_key_status == "configured"
+
+    @property
+    def dashscope_config_issue(self) -> str | None:
+        return describe_dashscope_config_issue(self.dashscope_api_key)
 
 
 settings = Settings()

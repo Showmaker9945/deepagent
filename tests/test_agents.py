@@ -1,11 +1,13 @@
 import sqlite3
 
+import pytest
 from deepagents.backends.composite import CompositeBackend
 from deepagents.backends.filesystem import FilesystemBackend
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 import app.agents as agents_module
 from app.agents import (
+    AgentConfigurationError,
     DecisionAgentRuntime,
     SkillTracingFilesystemBackend,
     begin_skill_trace,
@@ -118,6 +120,65 @@ def test_run_streaming_includes_visual_report_in_prompt(tmp_path, monkeypatch):
     assert "visual_report" in fake_agent.prompt
     assert "海报里写了时间、地点和票价。" in fake_agent.prompt
     assert "poster.png" in fake_agent.prompt
+
+
+def test_run_streaming_marks_visual_tool_degraded_when_visual_report_has_no_facts(tmp_path, monkeypatch):
+    storage = Storage(tmp_path / "agent.db")
+    storage.init_db()
+    storage.create_image_upload(
+        image_id="img-1",
+        file_name="poster.png",
+        mime_type="image/png",
+        local_path=str(tmp_path / "poster.png"),
+        size_bytes=128,
+    )
+    payload = RunCreateRequest(question="这张图能不能当证据？", image_ids=["img-1"])
+    run_id = storage.create_run(payload, "user-1")
+
+    runtime = DecisionAgentRuntime(Settings(), storage)
+    fake_agent = FakeStreamingAgent()
+    monkeypatch.setattr(runtime, "_get_agent", lambda classification: fake_agent)
+    monkeypatch.setattr(
+        runtime,
+        "_build_visual_report",
+        lambda run_id, payload, classification, images: VisualReport(
+            summary="已收到图片，但这轮视觉分析没有稳定跑通，我先不把图里的内容当作硬证据。",
+            extracted_facts=[],
+            uncertainties=["视觉分析失败：stub"],
+            image_count=len(images),
+        ),
+    )
+
+    classification = ClassificationResult(category="social", reason="stub")
+    events = list(
+        runtime.run_streaming(
+            run_id,
+            payload,
+            classification,
+            timeout_seconds=5,
+            should_cancel=lambda: False,
+        )
+    )
+
+    tool_finished = next(event for event in events if event.event_type == "tool_finished")
+    source_captured = next(
+        event
+        for event in events
+        if event.event_type == "source_captured" and event.payload.get("title") == "图片证据摘要"
+    )
+
+    assert tool_finished.payload["tool_name"] == "image_evidence_intake"
+    assert tool_finished.payload["status"] == "degraded"
+    assert source_captured.payload["source_meta"]["status"] == "degraded"
+
+
+def test_require_model_rejects_placeholder_dashscope_key(tmp_path):
+    storage = Storage(tmp_path / "agent.db")
+    storage.init_db()
+    runtime = DecisionAgentRuntime(Settings(DASHSCOPE_API_KEY="your-dashscope-api-key"), storage)
+
+    with pytest.raises(AgentConfigurationError, match="占位值"):
+        runtime._require_model()
 
 
 def test_get_agent_registers_disk_backed_skills(tmp_path, monkeypatch):

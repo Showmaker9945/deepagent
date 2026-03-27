@@ -31,7 +31,7 @@ from app.schemas import ClassificationResult, RunCreateRequest, RunImage, RunVer
 from app.scoring import score_tradeoff
 from app.storage import Storage
 from app.tools import ToolFactory, reset_tool_context, set_tool_context
-from app.visual import VisualAnalyzer
+from app.visual import VisualAnalyzer, visual_report_status
 
 logger = logging.getLogger(__name__)
 APP_DIR = Path(__file__).resolve().parent
@@ -339,8 +339,8 @@ class DecisionAgentRuntime:
     def _require_model(self) -> ChatOpenAI:
         if self._model is not None:
             return self._model
-        if not self.settings.dashscope_api_key:
-            raise AgentConfigurationError("缺少 `DASHSCOPE_API_KEY`，请先在 `.env` 里配置后再运行。")
+        if self.settings.dashscope_config_issue is not None:
+            raise AgentConfigurationError(self.settings.dashscope_config_issue)
         api_key = SecretStr(self.settings.dashscope_api_key)
         self._model = ChatOpenAI(
             api_key=api_key,
@@ -527,12 +527,14 @@ class DecisionAgentRuntime:
                         )
                         visual_report = self._build_visual_report(run_id, payload, classification, images)
                         if visual_report is not None:
+                            current_visual_status = visual_report_status(visual_report)
                             self.storage.update_status(run_id, "running", visual_report=visual_report)
                             annotate_traced_span(
                                 agent_span,
                                 metadata={
                                     "visual_report_present": True,
                                     "visual_uncertainty_count": len(visual_report.uncertainties),
+                                    "visual_analysis_status": current_visual_status,
                                 },
                             )
                             yield RuntimeStreamEvent(
@@ -543,6 +545,7 @@ class DecisionAgentRuntime:
                                     "url": None,
                                     "snippet": visual_report.summary,
                                     "source_meta": {
+                                        "status": current_visual_status,
                                         "image_count": visual_report.image_count,
                                         "facts": visual_report.extracted_facts,
                                         "uncertainties": visual_report.uncertainties,
@@ -553,8 +556,12 @@ class DecisionAgentRuntime:
                             "tool_finished",
                             {
                                 "tool_name": "image_evidence_intake",
-                                "status": "ok",
-                                "summary": "图片证据摘要已准备好，会一起送进这轮判断。",
+                                "status": visual_report_status(visual_report) if visual_report is not None else "ok",
+                                "summary": (
+                                    "图片证据摘要已准备好，会一起送进这轮判断。"
+                                    if visual_report is not None and visual_report_status(visual_report) == "ok"
+                                    else "图片已收录，但视觉分析这轮没有稳定产出硬证据，我会按弱证据处理。"
+                                ),
                             },
                         )
                     prompt = self._build_context_prompt(

@@ -33,10 +33,18 @@ class VisualAnalyzer:
         if not images:
             return VisualReport(summary="未收到图片证据。", image_count=0)
 
+        config_issue = self.settings.dashscope_config_issue
+        if config_issue is not None:
+            return VisualReport(
+                summary="已收到图片，但当前视觉模型配置不可用，我先不把图里的内容当作硬证据。",
+                uncertainties=[config_issue],
+                image_count=len(images),
+            )
+
         model = self._require_model()
         if model is None:
             return VisualReport(
-                summary="已收到图片，但当前未配置可用的视觉模型，暂时只能把它们当作未读附件处理。",
+                summary="已收到图片，但当前没有可用的视觉模型，这轮先把它们当作未解析附件处理。",
                 uncertainties=["视觉模型未启用，图片内容尚未被解析。"],
                 image_count=len(images),
             )
@@ -47,7 +55,7 @@ class VisualAnalyzer:
                     "type": "text",
                     "text": (
                         "请先识别每张图片的大致类型，再抽取和当前决策最相关的事实。"
-                        "输出必须简洁，面向“这事要不要做/买/去”。\n"
+                        "输出要简洁，面向“这件事要不要做/买/去”。\n"
                         f"问题：{payload.question}\n"
                         f"分类：{classification.category}\n"
                         f"补充说明：{payload.notes or '无'}\n"
@@ -84,7 +92,7 @@ class VisualAnalyzer:
     def _require_model(self) -> ChatOpenAI | None:
         if self._model is not None:
             return self._model
-        if not self.settings.dashscope_api_key:
+        if not self.settings.has_usable_dashscope_api_key:
             return None
 
         model_name = self.settings.vision_model_name or self.settings.model_name
@@ -97,6 +105,12 @@ class VisualAnalyzer:
             max_retries=0,
         )
         return self._model
+
+
+def visual_report_status(report: VisualReport) -> str:
+    if report.uncertainties and not report.extracted_facts:
+        return "degraded"
+    return "ok"
 
 
 def encode_image_as_data_url(path: Path, mime_type: str) -> str:

@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from app.agents import RuntimeStreamEvent
+from app.agents import AgentConfigurationError, RuntimeStreamEvent
 from app.config import settings
 from app.langsmith_utils import is_langsmith_enabled
 from app.main import app
@@ -62,6 +62,11 @@ class TimeoutRuntime:
 class ExplodingRuntime:
     def run_streaming(self, run_id, payload, classification, *, timeout_seconds, should_cancel):
         raise RuntimeError("stub exploded")
+
+
+class MisconfiguredRuntime:
+    def run_streaming(self, run_id, payload, classification, *, timeout_seconds, should_cancel):
+        raise AgentConfigurationError("`DASHSCOPE_API_KEY` 仍是占位值 `your-dashscope-api-key`，请替换为真实 DashScope API Key。")
 
 
 def test_run_flow_feedback_and_sources():
@@ -279,6 +284,26 @@ def test_runtime_exception_uses_fallback_verdict():
         assert any(event["event_type"] == "error" for event in body["events"])
 
 
+def test_model_configuration_error_uses_fallback_verdict():
+    with TestClient(app) as client:
+        app.state.manager.runtime = MisconfiguredRuntime()
+
+        create_response = client.post(
+            "/api/runs",
+            json={"question": "我要不要买这个课程？"},
+        )
+        assert create_response.status_code == 200
+        run_id = create_response.json()["run_id"]
+
+        run_response = client.get(f"/api/runs/{run_id}")
+        assert run_response.status_code == 200
+        body = run_response.json()
+        assert body["run"]["status"] == "completed"
+        assert body["run"]["verdict"] is not None
+        assert "占位值" in body["run"]["error_message"]
+        assert any(event["event_type"] == "error" for event in body["events"])
+
+
 def test_readyz_reports_storage_state():
     with TestClient(app) as client:
         response = client.get("/readyz")
@@ -288,8 +313,27 @@ def test_readyz_reports_storage_state():
     assert body["ok"] is True
     assert body["db_ready"] is True
     assert "has_dashscope_api_key" in body
+    assert "dashscope_key_status" in body
+    assert "dashscope_configured" in body
     assert "has_tavily_api_key" in body
     assert body["langsmith_enabled"] is is_langsmith_enabled(settings)
+
+
+def test_readyz_flags_placeholder_dashscope_key(monkeypatch):
+    original_key = settings.dashscope_api_key
+    try:
+        settings.dashscope_api_key = "your-dashscope-api-key"
+        with TestClient(app) as client:
+            response = client.get("/readyz")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["has_dashscope_api_key"] is True
+        assert body["dashscope_key_status"] == "placeholder"
+        assert body["dashscope_configured"] is False
+        assert "占位值" in body["dashscope_config_error"]
+    finally:
+        settings.dashscope_api_key = original_key
 
 
 def test_upload_endpoint_and_run_envelope_include_images():

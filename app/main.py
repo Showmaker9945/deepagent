@@ -217,9 +217,13 @@ async def readyz(request: Request) -> JSONResponse:
         "db_ready": db_ready,
         "db_path": str(storage.db_path),
         "has_dashscope_api_key": bool(settings.dashscope_api_key),
+        "dashscope_key_status": settings.dashscope_api_key_status,
+        "dashscope_configured": settings.has_usable_dashscope_api_key,
         "has_tavily_api_key": bool(settings.tavily_api_key),
         "langsmith_enabled": is_langsmith_enabled(settings),
     }
+    if settings.dashscope_config_issue:
+        payload["dashscope_config_error"] = settings.dashscope_config_issue
     if db_error:
         payload["db_error"] = db_error
         logger.warning("Readiness check failed", extra={"status": "not_ready"})
