@@ -315,6 +315,11 @@ def test_readyz_reports_storage_state():
     assert "has_dashscope_api_key" in body
     assert "dashscope_key_status" in body
     assert "dashscope_configured" in body
+    assert "vision_backend" in body
+    assert "visual_model_ready" in body
+    assert "local_vision_model_id" in body
+    assert "local_vision_model_dir" in body
+    assert "local_vision_model_downloaded" in body
     assert "has_tavily_api_key" in body
     assert body["langsmith_enabled"] is is_langsmith_enabled(settings)
 
